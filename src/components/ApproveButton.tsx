@@ -1,23 +1,25 @@
 // src/components/ApproveButton.tsx
 "use client";
 
-import { useTransition } from "react";
+import * as React from "react";
 
 type Props = {
   children: React.ReactNode;
+  /** Opcjonalny dodatkowy className, gdybyś chciał kiedyś nadpisać style. */
+  className?: string;
 };
 
-export default function ApproveButton({ children }: Props) {
-  const [isPending, startTransition] = useTransition();
+export default function ApproveButton({ children, className }: Props) {
+  const baseClasses =
+    "px-3 py-1 rounded border border-border text-xs font-medium " +
+    "bg-foreground text-background hover:bg-foreground/90 " +
+    "disabled:opacity-60 disabled:cursor-not-allowed";
+
+  const cls = className ? `${baseClasses} ${className}` : baseClasses;
 
   return (
-    <button
-      type="submit"
-      className="px-3 py-1 border rounded text-sm
-                 bg-zinc-800 text-white hover:bg-zinc-700 disabled:opacity-50"
-      disabled={isPending}
-    >
-      {isPending ? "..." : children}
+    <button type="submit" className={cls}>
+      {children}
     </button>
   );
 }

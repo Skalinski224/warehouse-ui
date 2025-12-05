@@ -1,20 +1,22 @@
-/* Tailwind v3 */
+/* Tailwind v3 base setup */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* Design tokens (light) — wartości to KANAŁY OKLCH: L C H (bez funkcji oklch()) */
+/* --- Design tokens OKLCH --- */
 :root {
   --radius: 0.625rem;
 
-  --background: 1 0 0;         /* białe tło w trybie jasnym (tu i tak wymuszamy dark) */
+  /* Light (fallback, ale i tak wymuszamy dark) */
+  --background: 1 0 0;
   --foreground: 0.145 0 0;
 
   --card: 1 0 0;
   --card-foreground: 0.145 0 0;
 
-  --popover: 1 0 0;
-  --popover-foreground: 0.145 0 0;
+  --border: 0.922 0 0;
+  --input: 0.922 0 0;
+  --ring: 0.708 0 0;
 
   --primary: 0.205 0 0;
   --primary-foreground: 0.985 0 0;
@@ -30,39 +32,27 @@
 
   --destructive: 0.577 0.245 27.325;
 
-  /* UWAGA: bez /10% — alfa będzie ustawiana przez tailwindowe /<alpha-value> */
-  --border: 0.922 0 0;
-  --input: 0.922 0 0;
-  --ring: 0.708 0 0;
-
-  /* wykresy – kanały OKLCH */
+  /* Sidebar / Charts */
+  --sidebar: 0.985 0 0;
+  --sidebar-foreground: 0.145 0 0;
   --chart-1: 0.646 0.222 41.116;
   --chart-2: 0.6 0.118 184.704;
   --chart-3: 0.398 0.07 227.392;
   --chart-4: 0.828 0.189 84.429;
   --chart-5: 0.769 0.188 70.08;
-
-  /* sidebar – kanały OKLCH */
-  --sidebar: 0.985 0 0;
-  --sidebar-foreground: 0.145 0 0;
-  --sidebar-primary: 0.205 0 0;
-  --sidebar-primary-foreground: 0.985 0 0;
-  --sidebar-accent: 0.97 0 0;
-  --sidebar-accent-foreground: 0.205 0 0;
-  --sidebar-border: 0.922 0 0;
-  --sidebar-ring: 0.708 0 0;
 }
 
-/* Design tokens (dark) — również kanały OKLCH */
+/* --- DARK THEME (default enforced) --- */
 .dark {
-  --background: 0.145 0 0;     /* ~ #0a0a0a */
-  --foreground: 0.985 0 0;     /* prawie biały */
+  --background: 0.145 0 0;
+  --foreground: 0.985 0 0;
 
-  --card: 0.205 0 0;           /* panel/karta */
+  --card: 0.205 0 0;
   --card-foreground: 0.985 0 0;
 
-  --popover: 0.205 0 0;
-  --popover-foreground: 0.985 0 0;
+  --border: 0.35 0 0;
+  --input: 0.32 0 0;
+  --ring: 0.556 0 0;
 
   --primary: 0.922 0 0;
   --primary-foreground: 0.205 0 0;
@@ -70,47 +60,60 @@
   --secondary: 0.269 0 0;
   --secondary-foreground: 0.985 0 0;
 
-  --muted: 0.269 0 0;
-  --muted-foreground: 0.708 0 0;
-
   --accent: 0.269 0 0;
   --accent-foreground: 0.985 0 0;
 
+  --muted: 0.269 0 0;
+  --muted-foreground: 0.708 0 0;
+
   --destructive: 0.704 0.191 22.216;
 
-  --border: 0.35 0 0;          /* ciemniejszy, lepszy kontrast na dark */
-  --input: 0.32 0 0;
-  --ring: 0.556 0 0;
+  --sidebar: 0.205 0 0;
+  --sidebar-foreground: 0.985 0 0;
 
   --chart-1: 0.488 0.243 264.376;
   --chart-2: 0.696 0.17 162.48;
   --chart-3: 0.769 0.188 70.08;
   --chart-4: 0.627 0.265 303.9;
   --chart-5: 0.645 0.246 16.439;
-
-  --sidebar: 0.205 0 0;               /* ~ #111214 */
-  --sidebar-foreground: 0.985 0 0;
-  --sidebar-primary: 0.488 0.243 264.376;
-  --sidebar-primary-foreground: 0.985 0 0;
-  --sidebar-accent: 0.269 0 0;
-  --sidebar-accent-foreground: 0.985 0 0;
-  --sidebar-border: 0.35 0 0;
-  --sidebar-ring: 0.556 0 0;
 }
 
+/* --- BASE LAYER --- */
 @layer base {
-  html { color-scheme: dark; } /* wymuszamy dark UI */
-  * { @apply border-border; }
-  body { @apply bg-background text-foreground; }
+  html {
+    color-scheme: dark;
+  }
 
-  /* Podstawowa typografia i rytm pionowy */
-  h1 { @apply text-2xl font-semibold tracking-tight; }
-  h2 { @apply text-xl font-semibold tracking-tight; }
-  h3 { @apply text-lg font-medium; }
-  main > * + * { @apply mt-6; }
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+
+  h1 {
+    @apply text-2xl font-semibold tracking-tight;
+  }
+  h2 {
+    @apply text-xl font-semibold tracking-tight;
+  }
+  h3 {
+    @apply text-lg font-medium;
+  }
+
+  main > * + * {
+    @apply mt-6;
+  }
 }
 
-/* Wygodna klasa “card” pod cały projekt */
+/* --- COMPONENTS --- */
 @layer components {
-  .card { @apply bg-card text-[length:inherit] text-current border border-border rounded-xl p-4; }
+  .card {
+    @apply bg-card text-current border border-border rounded-xl p-4;
+  }
+
+  .aspect-square {
+    aspect-ratio: 1 / 1;
+  }
 }

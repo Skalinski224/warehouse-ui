@@ -1,13 +1,14 @@
 // src/middleware.ts
-import type { NextRequest } from 'next/server';
-import { NextResponse } from 'next/server';
+import type { NextRequest } from "next/server";
+import { NextResponse } from "next/server";
 
 const PUBLIC = [
-  '/login',
-  '/auth/callback',
-  '/favicon.ico',
-  '/robots.txt',
-  '/sitemap.xml',
+  "/login",
+  "/auth/callback",
+  "/favicon.ico",
+  "/robots.txt",
+  "/sitemap.xml",
+  "/invite", // ⬅⬅ KLUCZOWA LINIA — zaproszenia są publiczne
 ];
 
 export function middleware(req: NextRequest) {
@@ -15,30 +16,33 @@ export function middleware(req: NextRequest) {
 
   // Statyki i publiczne ścieżki omijają middleware
   const isPublic =
-    pathname.startsWith('/_next') ||
-    pathname.startsWith('/_vercel') ||
+    pathname.startsWith("/_next") ||
+    pathname.startsWith("/_vercel") ||
     PUBLIC.some((p) => pathname === p || pathname.startsWith(p));
 
-  if (isPublic) return NextResponse.next();
+  if (isPublic) {
+    return NextResponse.next();
+  }
 
   const hasSession =
-    req.cookies.has('sb-access-token') || req.cookies.has('sb-refresh-token');
+    req.cookies.has("sb-access-token") ||
+    req.cookies.has("sb-refresh-token");
 
-  // Brak sesji → na /login z zachowaniem redirect
+  // Brak sesji → na /login z redirectem
   if (!hasSession) {
     const url = req.nextUrl.clone();
-    url.pathname = '/login';
-    url.search = ''; // wyczyść, potem dodaj własny redirect
-    url.searchParams.set('redirect', pathname + search);
+    url.pathname = "/login";
+    url.search = ""; // czyszczenie
+    url.searchParams.set("redirect", pathname + search);
     return NextResponse.redirect(url);
   }
 
-  // (Opcjonalnie) jeśli user ma sesję i jest na /login → przekaż na redirect lub /
-  if (pathname === '/login') {
+  // Jeśli user ma sesję i jest na /login → przekieruj dalej
+  if (pathname === "/login") {
     const url = req.nextUrl.clone();
-    const target = req.nextUrl.searchParams.get('redirect') || '/';
+    const target = req.nextUrl.searchParams.get("redirect") || "/";
     url.pathname = target;
-    url.search = '';
+    url.search = "";
     return NextResponse.redirect(url);
   }
 
@@ -47,5 +51,7 @@ export function middleware(req: NextRequest) {
 
 // Wykluczamy statyki i całe /api (w tym /api/auth/*) z middleware
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|api).*)'],
+  matcher: [
+    "/((?!_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|api).*)",
+  ],
 };

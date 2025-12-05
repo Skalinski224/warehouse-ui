@@ -1,32 +1,54 @@
-import { cookies } from 'next/headers';
-import { createServerClient, type CookieOptions } from '@supabase/ssr';
+// src/lib/supabaseServer.ts
 
-// Klient Supabase dla Server Components i Server Actions
+import { createServerClient } from "@supabase/ssr";
+import { cookies } from "next/headers";
+
+/**
+ * Wersja zgodna z Next 15:
+ * - cookies() jest async, więc supabaseServer też jest async
+ * - wewnętrzne get/set/remove są już synchroniczne (korzystają z cookieStore)
+ */
 export async function supabaseServer() {
-  // W Next.js 15 cookies() jest asynchroniczne
   const cookieStore = await cookies();
 
-  const supabase = createServerClient(
+  return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
         get(name: string) {
-          return cookieStore.get(name)?.value;
-        },
-        set(name: string, value: string, options: CookieOptions) {
           try {
-            cookieStore.set({ name, value, ...options });
-          } catch { /* ignore in readonly */ }
+            return cookieStore.get(name)?.value;
+          } catch {
+            return undefined;
+          }
         },
-        remove(name: string, options: CookieOptions) {
+        set(name: string, value: string, options?: any) {
           try {
-            cookieStore.set({ name, value: '', ...options, maxAge: 0 });
-          } catch { /* ignore in readonly */ }
+            cookieStore.set({
+              name,
+              value,
+              path: "/",
+              ...options,
+            });
+          } catch {
+            // RSC – ignorujemy
+          }
+        },
+        remove(name: string, options?: any) {
+          try {
+            cookieStore.set({
+              name,
+              value: "",
+              path: "/",
+              maxAge: 0,
+              ...options,
+            });
+          } catch {
+            // ignorujemy
+          }
         },
       },
     }
   );
-
-  return supabase;
 }

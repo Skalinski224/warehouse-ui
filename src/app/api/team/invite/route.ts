@@ -1,70 +1,118 @@
-// src/app/api/team/invite/route.ts
-import { NextResponse, type NextRequest } from 'next/server';
-import { z } from 'zod';
-import { createClient } from '@supabase/supabase-js';
-import { supabaseServer } from '@/lib/supabaseServer';
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { supabaseServer } from "@/lib/supabaseServer";
+import { buildInviteUrl, sendInviteEmail } from "@/lib/email";
 
-const Body = z.object({
+// ===============================
+//  Walidacja JSON
+// ===============================
+const BodySchema = z.object({
   email: z.string().email(),
-  role: z.enum(['manager', 'storeman', 'worker']),
   first_name: z.string().min(1),
   last_name: z.string().min(1),
-  phone: z.string().nullish(),
+  phone: z.string().trim().optional().nullable(),
+  role: z.enum(["manager", "storeman", "worker"]).default("worker"),
 });
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
-    const { email, role, first_name, last_name, phone } = Body.parse(await req.json());
+    // Bezpieczne parsowanie JSON
+    const json = await req.json().catch(() => null);
 
-    // 1) Autoryzacja — tylko manager może zapraszać
-    const sb = await supabaseServer();
-
-    const { data: appRole, error: roleErr } = await sb.rpc('current_app_role'); // user_role
-    if (roleErr) throw roleErr;
-    if (appRole !== 'manager') {
-      return NextResponse.json({ error: 'forbidden' }, { status: 403 });
+    const parsed = BodySchema.safeParse(json);
+    if (!parsed.success) {
+      return NextResponse.json(
+        {
+          error: "invalid_body",
+          details: parsed.error.flatten(),
+        },
+        { status: 400 }
+      );
     }
 
-    // account_id jest opcjonalne (single-tenant fallback)
-    const { data: accountIdData, error: acctErr } = await sb.rpc('current_account_id');
-    const accountId: string | null = acctErr ? null : ((accountIdData as string | null) ?? null);
+    const { email, first_name, last_name, phone, role } = parsed.data;
 
-    // 2) Admin client z Service Role (SERWER!)
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-    if (!url || !serviceKey) {
-      return NextResponse.json({ error: 'server_misconfigured' }, { status: 500 });
+    // ===============================
+    //  Supabase context
+    // ===============================
+    const supabase = await supabaseServer();
+
+    // ===============================
+    //  1. RPC — nowa funkcja w bazie
+    // ===============================
+    const { data: tokenData, error: rpcError } = await supabase.rpc(
+      "invite_team_member",
+      {
+        p_email: email.toLowerCase(),
+        p_first_name: first_name,
+        p_last_name: last_name,
+        p_phone: phone ?? null,
+        p_role: role,
+      }
+    );
+
+    if (rpcError) {
+      console.error("[invite] RPC error:", rpcError);
+      return NextResponse.json(
+        {
+          error: "invite_failed",
+          message: rpcError.message ?? "Failed to create invitation",
+        },
+        { status: 400 }
+      );
     }
-    const admin = createClient(url, serviceKey, {
-      auth: { autoRefreshToken: false, persistSession: false },
+
+    // SQL zwraca token jako TEXT
+    const token = typeof tokenData === "string" ? tokenData : String(tokenData);
+
+    // ===============================
+    //  2. Generujemy link do zaproszenia
+    // ===============================
+    const inviteUrl = buildInviteUrl(token);
+
+    // ===============================
+    //  3. Wysyłamy email przez Resend
+    // ===============================
+    const emailResult = await sendInviteEmail({
+      to: email,
+      inviteUrl,
     });
 
-    // 3) Wyślij zaproszenie — metadata: rola + profil + (opcjonalnie) account_id
-    const { error: inviteErr } = await admin.auth.admin.inviteUserByEmail(email, {
-      data: { role, first_name, last_name, phone, account_id: accountId ?? null },
-      // redirectTo: `${process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'}/auth/callback`,
-    });
-    if (inviteErr) {
-      return NextResponse.json({ error: inviteErr.message }, { status: 400 });
+    if (!emailResult.ok) {
+      console.error("[invite] Email sending failed:", emailResult.error);
+
+      return NextResponse.json(
+        {
+          ok: false,
+          warning: "Zaproszenie utworzone, ale mail nie został wysłany.",
+          token,
+          invite_url: inviteUrl,
+          error: emailResult.error,
+        },
+        { status: 200 }
+      );
     }
 
-    // 4) Wstępny wpis do team_members (BEZ user_id — tej kolumny nie ma)
-    const upsertPayload = {
-      first_name,
-      last_name,
-      phone: phone ?? null,
-      role,
-      email,
-      invited_at: new Date().toISOString(),
-      account_id: accountId ?? null,
-    };
-    const { error: tmErr } = await sb.from('team_members').insert([upsertPayload]);
-    if (tmErr) {
-      console.warn('team_members insert warn:', tmErr.message);
-    }
+    // ===============================
+    //  4. Sukces
+    // ===============================
+    return NextResponse.json(
+      {
+        ok: true,
+        token,
+        invite_url: inviteUrl,
+      },
+      { status: 200 }
+    );
+  } catch (err: any) {
+    console.error("[invite] Unexpected error:", err);
 
-    return NextResponse.json({ ok: true });
-  } catch (e: any) {
-    return NextResponse.json({ error: e?.message ?? 'error' }, { status: 400 });
+    return NextResponse.json(
+      {
+        error: "internal_error",
+        message: err?.message ?? "Unexpected server error",
+      },
+      { status: 500 }
+    );
   }
 }

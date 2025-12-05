@@ -1,5 +1,6 @@
+// (np.) src/app/api/assistant/demo/route.ts
 import { NextResponse } from "next/server";
-import { supabase } from "@/lib/supabaseClient";
+import { supabaseServer } from "@/lib/supabaseServer";
 
 // Prosty parser: wyłapuje "miejsce X ..."
 function extractPlace(text: string): string | null {
@@ -11,12 +12,15 @@ export async function POST(req: Request) {
   try {
     const { prompt } = await req.json();
     const q: string = String(prompt ?? "").trim();
+
     if (!q) {
       return NextResponse.json(
         { error: "Brak promptu" },
         { status: 400 }
       );
     }
+
+    const supabase = await supabaseServer();
 
     // 1) Pending raporty (count only)
     const { count: pendingDaily, error: pendingErr } = await supabase
@@ -32,7 +36,7 @@ export async function POST(req: Request) {
 
     const usage: Record<string, number> = {};
     for (const r of (reports as Array<{ items: any[] | null }> | null) ?? []) {
-      for (const it of (r.items ?? [])) {
+      for (const it of r.items ?? []) {
         const mid = String(it?.material_id ?? "");
         const qty = Number(it?.qty_used ?? 0);
         if (!mid || !Number.isFinite(qty)) continue;
@@ -53,7 +57,10 @@ export async function POST(req: Request) {
         .eq("id", top.material_id)
         .maybeSingle();
 
-      const label = mat?.name ? `${mat.name} (${mat.unit ?? "—"})` : top.material_id;
+      const label = mat?.name
+        ? `${mat.name} (${mat.unit ?? "—"})`
+        : top.material_id;
+
       topLine = `najczęściej raportowany materiał: ${label}, suma ~ ${top.qty}`;
     }
 
@@ -82,6 +89,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ answer: final });
   } catch (e: any) {
+    console.error("assistant demo route fatal:", e);
     return NextResponse.json(
       { error: String(e?.message ?? e) },
       { status: 500 }

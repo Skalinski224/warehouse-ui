@@ -1,10 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { z } from "zod";
 import { newDeliverySchema } from "@/lib/validators";
 import { useInvoiceAI } from "@/lib/useInvoiceAI";
-import { supabase } from "@/lib/supabaseClient";
+import { supabaseBrowser } from "@/lib/supabaseBrowser";
 import { useCurrency } from "@/components/Providers";
 import { formatMoney } from "@/lib/money";
 
@@ -46,24 +45,48 @@ export default function DeliveryForm() {
   const [search, setSearch] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [showSummary, setShowSummary] = useState(false);
+
   const { parseInvoice } = useInvoiceAI();
   const { currency } = useCurrency();
 
-  // Autocomplete: pobierz materiały
+  /* ----------------------------- LOAD MATERIAŁY ---------------------------- */
+
   useEffect(() => {
     let alive = true;
+    const supabase = supabaseBrowser();
+
     (async () => {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("materials")
-        .select("id,name,unit,image_url")
-        .order("name", { ascending: true });
+        .select("id, title, unit, image_url")
+        .order("title", { ascending: true });
+
       if (!alive) return;
-      setMaterials((data ?? []) as Material[]);
+
+      if (error) {
+        console.warn("DeliveryForm: materials load error", error.message);
+        setMaterials([]);
+      } else {
+        const rows =
+          (data as { id: string; title: string; unit: string | null; image_url: string | null }[]) ||
+          [];
+        setMaterials(
+          rows.map((r) => ({
+            id: r.id,
+            name: r.title,
+            unit: r.unit,
+            image_url: r.image_url,
+          }))
+        );
+      }
     })();
+
     return () => {
       alive = false;
     };
   }, []);
+
+  /* ------------------------------- SZUKAJKA ------------------------------- */
 
   const filtered = useMemo(() => {
     const s = search.trim().toLowerCase();
@@ -94,6 +117,8 @@ export default function DeliveryForm() {
       return { ...d, items: next };
     });
   };
+
+  /* ----------------------------- SUMY / FAKTURA ---------------------------- */
 
   const total = useMemo(
     () =>
@@ -126,6 +151,8 @@ export default function DeliveryForm() {
     }
   };
 
+  /* ------------------------------- WALIDACJA ------------------------------- */
+
   const validate = () => {
     const payload = {
       place: draft.place,
@@ -140,23 +167,28 @@ export default function DeliveryForm() {
         price_per_unit: it.price_per_unit ?? undefined,
       })),
     };
-  
+
     const res = newDeliverySchema.safeParse(payload);
     return res.success
       ? { ok: true as const }
       : { ok: false as const, msg: res.error.issues[0]?.message };
   };
-  
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     const v = validate();
-    if (!v.ok) return alert(v.msg ?? "Błąd walidacji");
-    setShowSummary(true); // tylko podsumowanie (brak zapisu do DB)
+    if (!v.ok) {
+      alert(v.msg ?? "Błąd walidacji");
+      return;
+    }
+    setShowSummary(true); // na razie tylko podsumowanie, bez zapisu do DB
   };
+
+  /* --------------------------------- RENDER -------------------------------- */
 
   return (
     <div className="space-y-4">
+      {/* toggle formularza */}
       <div className="flex items-center justify-between">
         <button
           type="button"
@@ -173,8 +205,11 @@ export default function DeliveryForm() {
       </div>
 
       {!open ? null : (
-        <form onSubmit={submit} className="space-y-6 rounded-2xl border border-white/10 bg-white/5 p-4">
-          {/* meta */}
+        <form
+          onSubmit={submit}
+          className="space-y-6 rounded-2xl border border-white/10 bg-white/5 p-4"
+        >
+          {/* META: data / miejsce / zgłaszający */}
           <div className="grid gap-4 sm:grid-cols-3">
             <label className="block">
               <span className="text-sm text-white/70">Data</span>
@@ -210,6 +245,7 @@ export default function DeliveryForm() {
             </label>
           </div>
 
+          {/* koszty + faktura */}
           <div className="grid gap-4 sm:grid-cols-3">
             <label className="block">
               <span className="text-sm text-white/70">Koszt dostawy</span>
@@ -220,7 +256,8 @@ export default function DeliveryForm() {
                 onChange={(e) =>
                   setDraft({
                     ...draft,
-                    transport_cost: e.target.value === "" ? null : Number(e.target.value),
+                    transport_cost:
+                      e.target.value === "" ? null : Number(e.target.value),
                   })
                 }
                 className="mt-1 w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm"
@@ -235,14 +272,17 @@ export default function DeliveryForm() {
                 onChange={(e) =>
                   setDraft({
                     ...draft,
-                    materials_cost: e.target.value === "" ? null : Number(e.target.value),
+                    materials_cost:
+                      e.target.value === "" ? null : Number(e.target.value),
                   })
                 }
                 className="mt-1 w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm"
               />
             </label>
             <label className="block">
-              <span className="text-sm text-white/70">Faktura (upload – placeholder)</span>
+              <span className="text-sm text-white/70">
+                Faktura (upload – placeholder)
+              </span>
               <input
                 type="file"
                 accept="image/*,.pdf"
@@ -258,20 +298,25 @@ export default function DeliveryForm() {
                 >
                   Parsuj fakturę (AI – placeholder)
                 </button>
-                {draft.invoice_url ? (
-                  <span className="text-xs text-white/50">Załączono: {file?.name}</span>
+                {draft.invoice_url && file ? (
+                  <span className="text-xs text-white/50">
+                    Załączono: {file.name}
+                  </span>
                 ) : null}
               </div>
             </label>
           </div>
 
-          {/* Pozycje dostawy */}
+          {/* POZYCJE DOSTAWY */}
           <div className="space-y-3 rounded-xl border border-white/10 bg-white/5 p-4">
             <div className="flex items-center justify-between">
               <span className="text-sm font-medium">Pozycje</span>
-              <span className="text-xs text-white/50">Łącznie: {draft.items.length}</span>
+              <span className="text-xs text-white/50">
+                Łącznie: {draft.items.length}
+              </span>
             </div>
 
+            {/* szukajka */}
             <div className="relative">
               <input
                 type="text"
@@ -283,7 +328,9 @@ export default function DeliveryForm() {
               {search && (
                 <div className="absolute z-10 mt-1 max-h-64 w-full overflow-auto rounded-lg border border-white/10 bg-black/70 p-1">
                   {filtered.length === 0 ? (
-                    <div className="px-3 py-2 text-xs text-white/40">Brak wyników…</div>
+                    <div className="px-3 py-2 text-xs text-white/40">
+                      Brak wyników…
+                    </div>
                   ) : (
                     filtered.map((m) => (
                       <button
@@ -293,7 +340,9 @@ export default function DeliveryForm() {
                         className="flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm hover:bg-white/10"
                       >
                         <span>{m.name}</span>
-                        <span className="text-xs text-white/40">{m.unit ?? "—"}</span>
+                        <span className="text-xs text-white/40">
+                          {m.unit ?? "—"}
+                        </span>
                       </button>
                     ))
                   )}
@@ -301,6 +350,7 @@ export default function DeliveryForm() {
               )}
             </div>
 
+            {/* lista pozycji */}
             {draft.items.length === 0 ? (
               <div className="rounded-md border border-white/10 px-3 py-2 text-sm text-white/60">
                 Dodaj pierwszy materiał powyżej ⬆
@@ -317,7 +367,11 @@ export default function DeliveryForm() {
                       type="number"
                       min={0}
                       value={it.quantity}
-                      onChange={(e) => updateItem(i, { quantity: Number(e.target.value) || 0 })}
+                      onChange={(e) =>
+                        updateItem(i, {
+                          quantity: Number(e.target.value) || 0,
+                        })
+                      }
                       className="w-24 rounded-md border border-white/10 bg-black/30 px-2 py-1 text-sm"
                       placeholder="ilość"
                     />
@@ -327,7 +381,10 @@ export default function DeliveryForm() {
                       value={it.price_per_unit ?? ""}
                       onChange={(e) =>
                         updateItem(i, {
-                          price_per_unit: e.target.value === "" ? null : Number(e.target.value),
+                          price_per_unit:
+                            e.target.value === ""
+                              ? null
+                              : Number(e.target.value),
                         })
                       }
                       className="w-28 rounded-md border border-white/10 bg-black/30 px-2 py-1 text-sm"
@@ -346,17 +403,19 @@ export default function DeliveryForm() {
             )}
           </div>
 
-          {/* Podsumowanie + submit */}
+          {/* PODSUMOWANIE + SUBMIT */}
           <div className="flex items-center justify-between">
             <div className="text-sm text-white/70">
               Suma pozycji:{" "}
-              <span className="font-medium text-white/90">{formatMoney(total, currency)}</span>
+              <span className="font-medium text-white/90">
+                {formatMoney(total, currency)}
+              </span>
             </div>
             <button
               type="submit"
               className="rounded-xl bg-white/90 px-4 py-2 text-sm font-medium text-black hover:bg-white"
             >
-              Zapisz szkic (podsumowanie)
+              Przejdź do podsumowania
             </button>
           </div>
 
@@ -364,20 +423,51 @@ export default function DeliveryForm() {
             <div className="space-y-3 rounded-xl border border-white/10 bg-white/5 p-4">
               <div className="text-sm font-medium">Podsumowanie (draft)</div>
               <div className="space-y-2 text-sm">
-                <div><strong>Miejsce:</strong> {draft.place}</div>
-                <div><strong>Data:</strong> {draft.date}</div>
-                <div><strong>Zgłaszający:</strong> {draft.submitter}</div>
+                <div>
+                  <strong>Miejsce:</strong> {draft.place}
+                </div>
+                <div>
+                  <strong>Data:</strong> {draft.date}
+                </div>
+                <div>
+                  <strong>Zgłaszający:</strong> {draft.submitter}
+                </div>
                 {draft.transport_cost && (
-                  <div><strong>Koszt dostawy:</strong> {formatMoney(draft.transport_cost, currency)}</div>
+                  <div>
+                    <strong>Koszt dostawy:</strong>{" "}
+                    {formatMoney(draft.transport_cost, currency)}
+                  </div>
                 )}
                 {draft.materials_cost && (
-                  <div><strong>Koszt materiałów:</strong> {formatMoney(draft.materials_cost, currency)}</div>
+                  <div>
+                    <strong>Koszt materiałów:</strong>{" "}
+                    {formatMoney(draft.materials_cost, currency)}
+                  </div>
                 )}
-                <div><strong>Suma pozycji:</strong> {formatMoney(total, currency)}</div>
-                <div><strong>Liczba pozycji:</strong> {draft.items.length}</div>
+                <div>
+                  <strong>Suma pozycji:</strong> {formatMoney(total, currency)}
+                </div>
+                <div>
+                  <strong>Liczba pozycji:</strong> {draft.items.length}
+                </div>
                 {draft.invoice_url && (
-                  <div><strong>Faktura:</strong> <a href={draft.invoice_url} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">Link</a></div>
+                  <div>
+                    <strong>Faktura:</strong>{" "}
+                    <span className="text-white/60">
+                      (lokalny szkic – brak uploadu do storage)
+                    </span>
+                  </div>
                 )}
+              </div>
+
+              <div className="pt-2">
+                <button
+                  type="button"
+                  className="rounded-xl border border-white/20 bg-emerald-500/80 px-4 py-2 text-sm font-medium text-black hover:bg-emerald-400"
+                  onClick={() => alert("TODO: zapis do bazy / create_delivery")}
+                >
+                  Dodaj dostawę jako oczekującą (TODO – zapis do bazy)
+                </button>
               </div>
             </div>
           )}

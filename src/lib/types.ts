@@ -6,17 +6,19 @@ export type UUID = string;
 // --- MATERIAŁY
 export type Material = {
   id: UUID;
-  name: string;
-  unit?: 'szt' | 'm' | 'kg' | 'opak' | string | null;
+  title: string;
+  description: string | null;
+  unit: 'szt' | 'm' | 'kg' | 'pcs' | string;
   base_quantity: number;
   current_quantity: number;
-  image_url?: string | null;
-  cta_url?: string | null;
-  description?: string | null;
-  created_at?: string;
-  updated_at?: string | null;
-  deleted_at?: string | null;
+  image_url: string | null;
+  cta_url: string | null;
+  created_at: string;
+  deleted_at: string | null;
+  deleted_by: string | null;
 };
+
+// (jeśli gdzieś w kodzie używałeś starego pola `name`, usuń je z użyć i podmień na `title`)
 
 // --- DOSTAWY
 export type DeliveryItem = {
@@ -116,7 +118,7 @@ export type DeliveryRowDB = {
   approved: boolean | null;
   delivery_cost?: number | null;          // nagłówek kosztu dostawy
   materials_cost?: number | null;         // jeżeli trzymasz w kolumnie
-  items: any | null;                       // jsonb – parsuj do DeliveryItem[]
+  items: any | null;                      // jsonb – parsuj do DeliveryItem[]
   date?: string | null;
   person?: string | null;
   invoice_url?: string | null;
@@ -134,5 +136,5 @@ export type DailyReportRowDB = {
   task_name?: string | null;
   is_completed?: boolean | null;
   stage_id?: UUID | null;
-  items: any | null;                       // jsonb – parsuj do UsageItem[]
+  items: any | null;                      // jsonb – parsuj do UsageItem[]
 };
