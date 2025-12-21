@@ -1,10 +1,12 @@
-// src/app/(app)/deliveries/_components/PendingDeliveriesList.tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
 import { approveDelivery } from "@/lib/actions";
 import ApproveButton from "@/components/ApproveButton";
+
+import RoleGuard from "@/components/RoleGuard";
+import { PERM } from "@/lib/permissions";
 
 export type PendingDeliveryRow = {
   id: string;
@@ -24,8 +26,8 @@ type Props = {
   showHeader?: boolean;
 };
 
-export default function PendingDeliveriesList({ showHeader = true }: Props) {
-  const supabase = supabaseBrowser();
+function PendingDeliveriesListInner({ showHeader = true }: Props) {
+  const supabase = useMemo(() => supabaseBrowser(), []);
 
   const [rows, setRows] = useState<PendingDeliveryRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -47,6 +49,7 @@ export default function PendingDeliveriesList({ showHeader = true }: Props) {
           "materials_cost",
           "items",
           "approved",
+          "deleted_at",
         ].join(", ")
       )
       .eq("approved", false)
@@ -60,17 +63,20 @@ export default function PendingDeliveriesList({ showHeader = true }: Props) {
         (error as any).message ?? error
       );
       setRows([]);
-    } else {
-      const safeRows = (data ?? []) as unknown as PendingDeliveryRow[];
-      setRows(safeRows);
+      setLoading(false);
+      return;
     }
 
+    const safeRows = (data ?? []) as unknown as PendingDeliveryRow[];
+    setRows(safeRows);
     setLoading(false);
   }
 
   useEffect(() => {
+    // pierwsze pobranie
     load();
 
+    // realtime: po każdej zmianie w deliveries robimy refetch
     const ch = supabase
       .channel("deliveries-pending-updates")
       .on(
@@ -194,6 +200,8 @@ export default function PendingDeliveriesList({ showHeader = true }: Props) {
                     Po akceptacji stany magazynowe zostaną uzupełnione na
                     podstawie pozycji dostawy.
                   </span>
+
+                  {/* Akcja = permission gate (nie tylko UI, ale też server action musi to sprawdzać po stronie serwera) */}
                   <form action={approveDelivery} className="shrink-0">
                     <input type="hidden" name="delivery_id" value={r.id} />
                     <ApproveButton>Akceptuj</ApproveButton>
@@ -205,5 +213,14 @@ export default function PendingDeliveriesList({ showHeader = true }: Props) {
         </ul>
       )}
     </section>
+  );
+}
+
+export default function PendingDeliveriesList(props: Props) {
+  // TYLKO kto ma prawo akceptować dostawy
+  return (
+    <RoleGuard allow={PERM.DELIVERIES_APPROVE} silent>
+      <PendingDeliveriesListInner {...props} />
+    </RoleGuard>
   );
 }

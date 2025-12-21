@@ -1,246 +1,137 @@
-"use client";
-
+// src/app/(app)/page.tsx
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import type { Session } from "@supabase/supabase-js";
-import { supabaseBrowser } from "@/lib/supabaseBrowser";
+import { redirect } from "next/navigation";
+import { supabaseServer } from "@/lib/supabaseServer";
+import { getPermissionSnapshot } from "@/lib/currentUser";
 
-type Material = {
-  id: string;
-  title: string | null;
-  base_quantity: number | null;
-  current_quantity: number | null;
+type CTALink = {
+  href: string;
+  label: string;
+  sub?: string;
 };
 
-export default function Dashboard() {
-  const supabase = supabaseBrowser();
+function ctasForRole(role: string | null | undefined): CTALink[] {
+  const r = (role ?? "").toLowerCase();
 
-  // undefined = trwa weryfikacja; null = brak sesji; Session = zalogowany
-  const [session, setSession] = useState<Session | null | undefined>(undefined);
-  const [materials, setMaterials] = useState<Material[]>([]);
-  const [error, setError] = useState<string | null>(null);
-
-  // 1) sprawdzenie/śledzenie sesji
-  useEffect(() => {
-    let ignore = false;
-
-    supabase.auth.getSession().then(({ data }) => {
-      if (!ignore) setSession(data.session ?? null);
-    });
-
-    const { data: sub } = supabase.auth.onAuthStateChange((_ev, s) => {
-      setSession(s ?? null);
-    });
-
-    return () => {
-      ignore = true;
-      sub.subscription.unsubscribe();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // 2) pobranie danych po zalogowaniu
-  useEffect(() => {
-    if (!session) return;
-
-    (async () => {
-      const { data, error } = await supabase
-        .from("materials")
-        .select("id, title, base_quantity, current_quantity")
-        .order("title");
-
-      if (error) {
-        setError(error.message);
-      } else {
-        setMaterials((data ?? []) as Material[]);
-      }
-    })();
-  }, [session, supabase]);
-
-  // Ekran weryfikacji
-  if (session === undefined) {
-    return (
-      <main className="flex min-h-screen items-center justify-center bg-background text-foreground/70">
-        Trwa weryfikacja sesji…
-      </main>
-    );
+  if (r === "worker" || r === "foreman") {
+    return [{ href: "/tasks", label: "Idź do zadań", sub: "Twoje zadania i statusy prac." }];
   }
 
-  // Niezalogowany → link do logowania
-  if (!session) {
-    return (
-      <main className="flex min-h-screen items-center justify-center bg-background">
-        <Link
-          href="/login?redirect=/"
-          className="rounded-xl border border-border bg-card px-5 py-3 text-sm font-medium text-foreground shadow-sm transition hover:-translate-y-0.5 hover:border-foreground/30 hover:bg-foreground/[0.06] hover:shadow-xl hover:shadow-black/40"
-        >
-          Zaloguj się, aby zobaczyć dashboard
-        </Link>
-      </main>
-    );
+  if (r === "storeman") {
+    return [
+      { href: "/daily-reports", label: "Wypełnij raport dzienny", sub: "Zgłoś zużycia i dodaj zdjęcia." },
+      { href: "/tasks", label: "Zobacz zadania", sub: "Podgląd i przypisania." },
+    ];
   }
 
-  const cards = [
-    {
-      href: "/low-stock",
-      title: "Co się kończy",
-      desc: "Materiały poniżej 25% stanu początkowego.",
-    },
-    {
-      href: "/deliveries",
-      title: "Nowe dostawy",
-      desc: "Dodawaj i zatwierdzaj przyjęcia materiałów.",
-    },
-    {
-      href: "/reports",
-      title: "Raporty",
-      desc: "Podsumowania kosztów, zużyć i etapów projektu.",
-    },
-  ];
+  return [{ href: "/analyze", label: "Przejdź do analiz", sub: "Metryki, odchylenia, raporty." }];
+}
+
+function messageForRole(role: string | null | undefined): string {
+  const r = (role ?? "").toLowerCase();
+  if (r === "worker") return "Dzisiaj lecimy konkretnie — sprawdź zadania i wrzuć postęp, jeśli coś domknąłeś.";
+  if (r === "foreman") return "Masz podgląd na pracę ekipy — ogarnij zadania i przypisania.";
+  if (r === "storeman") return "Masz dziś dwie główne rzeczy: raport dzienny i pilnowanie zadań/stanów.";
+  if (r === "manager") return "Najlepszy start to analizy — zobacz, co się dzieje w projekcie i kto zużywa najwięcej.";
+  if (r === "owner") return "Startujemy od overview — analizy dadzą Ci szybki obraz kosztów i odchyleń.";
+  return "Wybierz, gdzie chcesz wejść dalej.";
+}
+
+async function pickFullName(sb: any, user: any, accountId: string | null): Promise<string> {
+  // 1) team_members (source of truth)
+  if (accountId) {
+    const { data: tm } = await sb
+      .from("team_members")
+      .select("first_name, last_name")
+      .eq("account_id", accountId)
+      .eq("user_id", user.id)
+      .is("deleted_at", null)
+      .maybeSingle();
+
+    const first = (tm?.first_name ?? "").toString().trim();
+    const last = (tm?.last_name ?? "").toString().trim();
+    const full = [first, last].filter(Boolean).join(" ").trim();
+    if (full) return full;
+  }
+
+  // 2) fallback: auth metadata
+  const metaName =
+    (user?.user_metadata?.full_name as string | undefined) ??
+    (user?.user_metadata?.name as string | undefined) ??
+    null;
+
+  if (metaName && metaName.trim()) return metaName.trim();
+
+  // 3) fallback: email
+  if (typeof user?.email === "string" && user.email.trim()) return user.email.trim();
+
+  return "Użytkowniku";
+}
+
+export default async function Dashboard() {
+  const sb = await supabaseServer();
+
+  const {
+    data: { user },
+  } = await sb.auth.getUser();
+
+  if (!user) {
+    redirect(`/login?redirect=${encodeURIComponent("/")}`);
+  }
+
+  const snap = await getPermissionSnapshot();
+  const role = snap?.role ?? null;
+  const accountId = snap?.account_id ?? null;
+
+  const fullName = await pickFullName(sb, user, accountId);
+  const ctas = ctasForRole(role);
+  const msg = messageForRole(role);
 
   return (
-    <main className="min-h-screen bg-background px-4 py-6 text-foreground md:px-8 md:py-8">
-      <div className="mx-auto flex max-w-6xl flex-col gap-6">
-        {/* Pasek górny */}
-        <header className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-          <div>
+    <main className="min-h-[calc(100vh-2rem)] bg-background px-4 py-8 text-foreground md:px-8">
+      <div className="mx-auto max-w-4xl">
+        <div className="card rounded-2xl border border-border/70 bg-card/80 p-6 shadow-sm">
+          <div className="space-y-2">
+            <div className="text-xs font-semibold uppercase tracking-wide text-foreground/60">
+              Warehouse App
+            </div>
+
             <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">
-              Dashboard
+              Witaj z powrotem, <span className="text-foreground">{fullName}</span>
             </h1>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Szybki przegląd magazynu i najważniejszych akcji w projekcie.
-            </p>
-          </div>
-          <div className="flex items-center gap-2 rounded-2xl border border-border bg-card/70 px-3 py-2 text-xs text-muted-foreground shadow-sm">
-            <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-            <div className="flex flex-col">
-              <span className="text-[11px] uppercase tracking-wide text-muted-foreground/70">
-                Zalogowany użytkownik
-              </span>
-              <span className="text-xs font-medium text-foreground">
-                {session.user.email}
-              </span>
+
+            <p className="text-sm text-foreground/70 leading-relaxed max-w-[70ch]">{msg}</p>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              {ctas.map((c, idx) => (
+                <Link
+                  key={c.href}
+                  href={c.href}
+                  className={[
+                    "inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold transition border",
+                    idx === 0
+                      ? "border-border/70 bg-foreground/15 hover:bg-foreground/20"
+                      : "border-border/70 bg-background/40 hover:bg-background/60",
+                  ].join(" ")}
+                >
+                  {c.label} <span className="ml-2 text-foreground/70">→</span>
+                </Link>
+              ))}
             </div>
-          </div>
-        </header>
 
-        {/* Szybkie akcje */}
-        <section className="space-y-3">
-          <h2 className="text-sm font-semibold uppercase text-foreground/60">
-            Szybkie akcje
-          </h2>
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {cards.map((c) => (
-              <Link
-                key={c.href}
-                href={c.href}
-                className="group relative block rounded-2xl border border-border bg-card/80 p-5 transition hover:-translate-y-0.5 hover:border-foreground/20 hover:bg-foreground/[0.05] hover:shadow-xl hover:shadow-black/40"
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-base font-semibold text-foreground">
-                      {c.title}
+            {ctas.some((c) => c.sub) ? (
+              <div className="mt-2 space-y-1">
+                {ctas.map((c) =>
+                  c.sub ? (
+                    <div key={c.href} className="text-xs text-foreground/55">
+                      <span className="font-semibold text-foreground/60">{c.label}:</span> {c.sub}
                     </div>
-                    <div className="mt-1 text-sm text-foreground/70">
-                      {c.desc}
-                    </div>
-                  </div>
-                  <span className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-border/70 text-xs text-muted-foreground transition group-hover:border-foreground/50 group-hover:text-foreground">
-                    →
-                  </span>
-                </div>
-              </Link>
-            ))}
+                  ) : null
+                )}
+              </div>
+            ) : null}
           </div>
-        </section>
-
-        {/* Placeholder AI */}
-        <section className="rounded-2xl border border-dashed border-border bg-card/60 p-5 text-sm text-foreground/70">
-          <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-foreground/60">
-            Asystent AI (w przygotowaniu)
-          </div>
-          <p>
-            Tutaj pojawi się chat z AI, który pozwoli zadawać pytania o
-            magazyn, koszty i postęp prac w naturalnym języku.
-          </p>
-        </section>
-
-        {/* Podgląd materiałów */}
-        <section className="space-y-3">
-          <div className="flex items-center justify-between gap-2">
-            <h2 className="text-sm font-semibold uppercase text-foreground/60">
-              Szybki podgląd materiałów
-            </h2>
-            <Link
-              href="/materials"
-              className="text-xs text-muted-foreground underline-offset-4 hover:underline"
-            >
-              Przejdź do pełnej listy
-            </Link>
-          </div>
-
-          {error ? (
-            <div className="rounded-xl border border-destructive/40 bg-destructive/10 p-4 text-sm">
-              DB error: {error}
-            </div>
-          ) : materials.length > 0 ? (
-            <ul className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {materials.map((m) => {
-                const base = m.base_quantity ?? 0;
-                const current = m.current_quantity ?? 0;
-                const pct =
-                  base > 0 ? Math.round((current / base) * 100) : null;
-                const safePct = Math.min(Math.max(pct ?? 0, 0), 150);
-
-                const isLow = pct !== null && pct <= 25;
-
-                return (
-                  <li
-                    key={m.id}
-                    className="rounded-xl border border-border bg-card p-4 text-sm shadow-sm"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <div className="font-medium text-foreground">
-                          {m.title ?? "Bez nazwy"}
-                        </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
-                          baza: {base} &nbsp;|&nbsp; stan: {current}
-                        </div>
-                      </div>
-                      {isLow && (
-                        <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-400">
-                          Mało
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="mt-3">
-                      <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                        <span>Poziom zapasu</span>
-                        <span>{pct !== null ? `${pct}%` : "—"}</span>
-                      </div>
-                      <div className="mt-1 h-2 rounded-full bg-foreground/[0.08]">
-                        <div
-                          className={`h-2 rounded-full ${
-                            isLow
-                              ? "bg-amber-400"
-                              : "bg-emerald-500"
-                          }`}
-                          style={{ width: `${safePct}%` }}
-                        />
-                      </div>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          ) : (
-            <p className="text-sm text-foreground/70">
-              Brak danych do wyświetlenia. Dodaj pierwszy materiał lub dostawę.
-            </p>
-          )}
-        </section>
+        </div>
       </div>
     </main>
   );

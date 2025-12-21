@@ -4,6 +4,7 @@
 import * as React from "react";
 import { useRouter } from "next/navigation";
 import RoleGuard from "@/components/RoleGuard";
+import { PERM } from "@/lib/permissions";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
 
 import type { VCrewsOverview } from "./CrewsTable";
@@ -102,7 +103,7 @@ export function ChangeLeaderDialog({
   }
 
   return (
-    <RoleGuard allow={["owner", "manager"]} silent>
+    <RoleGuard allow={PERM.CREWS_MANAGE} silent>
       <>
         <button
           type="button"
@@ -156,9 +157,7 @@ export function ChangeLeaderDialog({
                     onChange={(e) => setLeaderId(e.target.value)}
                     className="h-8 w-full rounded-lg border border-border bg-background px-2 text-sm text-foreground outline-none transition focus:border-primary focus:ring-1 focus:ring-primary/60"
                   >
-                    <option value="">
-                      — Wybierz członka brygady —
-                    </option>
+                    <option value="">— Wybierz członka brygady —</option>
 
                     {membersInCrew.map((m) => {
                       const fullName =

@@ -1,21 +1,21 @@
 // src/app/(app)/team/crews/[id]/page.tsx
-
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
+import BackButton from "@/components/BackButton";
 import { Crown } from "lucide-react";
 
 import { supabaseServer } from "@/lib/supabaseServer";
-import RoleGuard from "@/components/RoleGuard";
 
 import AssignMemberDialog from "../_components/AssignMemberDialog";
 import ChangeLeaderDialog from "../_components/ChangeLeaderDialog";
 import type { VTeamMember } from "@/components/team/TeamMembersTable";
 import type { VCrewsOverview } from "../_components/CrewsTable";
 
+import { PERM, can, canAny, type PermissionSnapshot } from "@/lib/permissions";
+
 // --- typy pomocnicze z nowym backendem ---
 type PageProps = {
-  // w Next 15 params jest Promise
   params: Promise<{ id: string }>;
 };
 
@@ -27,8 +27,32 @@ type Member = VTeamMember & {
   crew_id?: string | null;
 };
 
+// --------------------------------------------------------
+//  PERMISSIONS SNAPSHOT (DB)
+// --------------------------------------------------------
+async function fetchMyPermissionsSnapshot(): Promise<PermissionSnapshot | null> {
+  const supabase = await supabaseServer();
+  const { data, error } = await supabase.rpc("my_permissions_snapshot");
+
+  if (error) {
+    console.error("my_permissions_snapshot error:", error);
+    return null;
+  }
+
+  const snap = Array.isArray(data) ? (data[0] ?? null) : (data ?? null);
+  return (snap as PermissionSnapshot | null) ?? null;
+}
+
+function deny(msg = "Brak uprawnień."): never {
+  throw new Error(msg);
+}
+
+function requirePerm(snapshot: PermissionSnapshot | null, key: any, msg?: string) {
+  if (!can(snapshot, key)) deny(msg ?? "Brak uprawnień.");
+}
+
 // =======================
-// Server actions
+// Server actions (twarde gatingi)
 // =======================
 
 async function updateCrewAction(formData: FormData) {
@@ -39,6 +63,10 @@ async function updateCrewAction(formData: FormData) {
   const description = (formData.get("description") as string | null) ?? null;
 
   const supabase = await supabaseServer();
+  const snapshot = await fetchMyPermissionsSnapshot();
+
+  // tylko foreman/manager/owner
+  requirePerm(snapshot, PERM.CREWS_MANAGE, "Brak uprawnień do edycji brygady.");
 
   const { error } = await supabase.rpc("update_crew", {
     p_crew_id: crewId,
@@ -48,7 +76,6 @@ async function updateCrewAction(formData: FormData) {
 
   if (error) {
     console.error("update_crew error", error);
-    // w MVP tylko log – UI i tak się przeładuje
   }
 
   revalidatePath(`/team/crews/${crewId}`);
@@ -61,14 +88,15 @@ async function deleteCrewAction(formData: FormData) {
   const crewId = formData.get("crewId") as string;
 
   const supabase = await supabaseServer();
+  const snapshot = await fetchMyPermissionsSnapshot();
 
-  const { error } = await supabase.rpc("delete_crew", {
-    p_crew_id: crewId,
-  });
+  // tylko foreman/manager/owner
+  requirePerm(snapshot, PERM.CREWS_MANAGE, "Brak uprawnień do usuwania brygady.");
+
+  const { error } = await supabase.rpc("delete_crew", { p_crew_id: crewId });
 
   if (error) {
     console.error("delete_crew error", error);
-    // nie redirectujemy przy błędzie – ale logujemy
     return;
   }
 
@@ -80,9 +108,13 @@ async function unassignMemberAction(formData: FormData) {
   "use server";
 
   const memberId = formData.get("memberId") as string;
-  const crewId = formData.get("crewId") as string; // do revalidate
+  const crewId = formData.get("crewId") as string;
 
   const supabase = await supabaseServer();
+  const snapshot = await fetchMyPermissionsSnapshot();
+
+  // tylko foreman/manager/owner
+  requirePerm(snapshot, PERM.CREWS_MANAGE, "Brak uprawnień do zmian w brygadzie.");
 
   const { error } = await supabase.rpc("assign_member_to_crew", {
     p_member_id: memberId,
@@ -101,10 +133,14 @@ async function moveMemberAction(formData: FormData) {
   "use server";
 
   const memberId = formData.get("memberId") as string;
-  const crewId = formData.get("crewId") as string; // aktualna brygada
+  const crewId = formData.get("crewId") as string;
   const targetCrewId = formData.get("targetCrewId") as string;
 
   const supabase = await supabaseServer();
+  const snapshot = await fetchMyPermissionsSnapshot();
+
+  // tylko foreman/manager/owner
+  requirePerm(snapshot, PERM.CREWS_MANAGE, "Brak uprawnień do zmian w brygadzie.");
 
   const { error } = await supabase.rpc("assign_member_to_crew", {
     p_member_id: memberId,
@@ -144,6 +180,14 @@ export default async function CrewDetailPage(props: PageProps) {
   const crewId = id;
 
   const supabase = await supabaseServer();
+  const snapshot = await fetchMyPermissionsSnapshot();
+
+  // wg ustaleń: worker/storeman też mogą wejść w szczegóły brygady (read-only)
+  const canReadCrews = canAny(snapshot, [PERM.CREWS_READ, PERM.TEAM_READ]);
+  if (!canReadCrews) notFound();
+
+  // wg ustaleń: foreman/manager/owner mogą “wszystko” w brygadach
+  const canManageCrews = can(snapshot, PERM.CREWS_MANAGE);
 
   // 1) pobierz brygadę
   const { data: crewData, error: crewError } = await supabase
@@ -152,9 +196,7 @@ export default async function CrewDetailPage(props: PageProps) {
     .eq("id", crewId)
     .single();
 
-  if (!crewData || crewError) {
-    notFound();
-  }
+  if (!crewData || crewError) notFound();
 
   const crew = crewData as Crew;
 
@@ -179,52 +221,53 @@ export default async function CrewDetailPage(props: PageProps) {
 
   const allMembers = (membersData ?? []) as Member[];
 
-  // członkowie przypisani do TEJ brygady – po crew_id
-  const membersInThisCrew = allMembers.filter(
-    (m) => m.crew_id === crew.id
-  );
+  // członkowie tej brygady – po crew_id
+  const membersInThisCrew = allMembers.filter((m) => m.crew_id === crew.id);
 
   const leaderName =
-    [crew.leader_first_name, crew.leader_last_name]
-      .filter(Boolean)
-      .join(" ") || null;
+    [crew.leader_first_name, crew.leader_last_name].filter(Boolean).join(" ") ||
+    null;
 
   return (
-    <RoleGuard allow={["owner", "manager"]}>
-      <section className="flex flex-col gap-4 md:gap-6">
-        {/* Breadcrumb */}
+    <section className="flex flex-col gap-4 md:gap-6">
+      {/* Back button (zawsze widoczny) */}
+      <div className="flex items-center justify-between">
         <div className="text-xs text-muted-foreground">
           <Link href="/team/crews" className="hover:underline">
             Brygady
           </Link>{" "}
-          /{" "}
-          <span className="font-medium text-foreground">{crew.name}</span>
+          / <span className="font-medium text-foreground">{crew.name}</span>
         </div>
 
-        {/* Nagłówek + akcje główne */}
-        <header className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-          <div className="flex flex-col gap-1">
-            <h1 className="text-xl font-semibold tracking-tight text-foreground md:text-2xl">
-              {crew.name}
-            </h1>
-            <p className="text-sm text-muted-foreground">
-              Utworzona: {formatDate(crew.created_at)} • Członków:{" "}
-              <span className="font-medium text-foreground">
-                {membersInThisCrew.length}
-              </span>
-              {leaderName && (
-                <>
-                  {" "}
-                  • Lider:{" "}
-                  <span className="inline-flex items-center gap-1 font-medium text-foreground">
-                    <Crown className="h-3 w-3" />
-                    {leaderName}
-                  </span>
-                </>
-              )}
-            </p>
-          </div>
+        <BackButton />
+      </div>
 
+      {/* Nagłówek + akcje główne */}
+      <header className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div className="flex flex-col gap-1">
+          <h1 className="text-xl font-semibold tracking-tight text-foreground md:text-2xl">
+            {crew.name}
+          </h1>
+          <p className="text-sm text-muted-foreground">
+            Utworzona: {formatDate(crew.created_at)} • Członków:{" "}
+            <span className="font-medium text-foreground">
+              {membersInThisCrew.length}
+            </span>
+            {leaderName && (
+              <>
+                {" "}
+                • Lider:{" "}
+                <span className="inline-flex items-center gap-1 font-medium text-foreground">
+                  <Crown className="h-3 w-3" />
+                  {leaderName}
+                </span>
+              </>
+            )}
+          </p>
+        </div>
+
+        {/* ✅ Akcje tylko dla canManageCrews (worker/storeman NIC nie widzą) */}
+        {canManageCrews && (
           <div className="flex flex-wrap gap-2">
             <AssignMemberDialog
               members={allMembers}
@@ -238,7 +281,6 @@ export default async function CrewDetailPage(props: PageProps) {
               triggerLabel="Ustaw lidera"
             />
 
-            {/* Usunięcie całej brygady */}
             <form action={deleteCrewAction}>
               <input type="hidden" name="crewId" value={crew.id} />
               <button
@@ -249,18 +291,21 @@ export default async function CrewDetailPage(props: PageProps) {
               </button>
             </form>
           </div>
-        </header>
+        )}
+      </header>
 
-        {/* Sekcja: szczegóły / edycja nazwy i opisu */}
-        <div className="rounded-2xl border border-border/70 bg-card/60 px-4 py-3 shadow-sm md:px-6">
-          <h2 className="text-sm font-semibold tracking-tight text-foreground">
-            Szczegóły brygady
-          </h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Zmień nazwę i opis brygady. Zapis aktualizuje dane dla całego
-            konta.
-          </p>
+      {/* Sekcja: szczegóły / edycja nazwy i opisu */}
+      <div className="rounded-2xl border border-border/70 bg-card/60 px-4 py-3 shadow-sm md:px-6">
+        <h2 className="text-sm font-semibold tracking-tight text-foreground">
+          Szczegóły brygady
+        </h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {canManageCrews
+            ? "Zmień nazwę i opis brygady. Zapis aktualizuje dane dla całego konta."
+            : "Podgląd danych brygady."}
+        </p>
 
+        {canManageCrews ? (
           <form
             action={updateCrewAction}
             className="mt-3 flex flex-col gap-3 md:max-w-xl"
@@ -309,48 +354,62 @@ export default async function CrewDetailPage(props: PageProps) {
               </button>
             </div>
           </form>
-        </div>
+        ) : (
+          <div className="mt-3 space-y-2 text-sm">
+            <div className="rounded-xl border border-border/60 bg-background/40 px-3 py-2">
+              <div className="text-xs text-muted-foreground">Nazwa</div>
+              <div className="font-medium text-foreground">{crew.name}</div>
+            </div>
+            <div className="rounded-xl border border-border/60 bg-background/40 px-3 py-2">
+              <div className="text-xs text-muted-foreground">Opis</div>
+              <div className="text-foreground">
+                {crew.description?.trim() ? crew.description : "—"}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
 
-        {/* Lista członków tej brygady */}
-        <div className="rounded-2xl border border-border/70 bg-card/60 px-4 py-3 shadow-sm md:px-6">
-          <h2 className="text-sm font-semibold tracking-tight text-foreground">
-            Członkowie brygady
-          </h2>
+      {/* Lista członków tej brygady (widoczna dla wszystkich, ale akcje tylko dla canManageCrews) */}
+      <div className="rounded-2xl border border-border/70 bg-card/60 px-4 py-3 shadow-sm md:px-6">
+        <h2 className="text-sm font-semibold tracking-tight text-foreground">
+          Członkowie brygady
+        </h2>
 
-          {membersInThisCrew.length === 0 ? (
-            <p className="mt-2 text-sm text-muted-foreground">
-              Ta brygada nie ma jeszcze przypisanych członków.
-            </p>
-          ) : (
-            <ul className="mt-3 space-y-2 text-sm">
-              {membersInThisCrew.map((m) => {
-                const isLeader =
-                  crew.leader_member_id && m.id === crew.leader_member_id;
+        {membersInThisCrew.length === 0 ? (
+          <p className="mt-2 text-sm text-muted-foreground">
+            Ta brygada nie ma jeszcze przypisanych członków.
+          </p>
+        ) : (
+          <ul className="mt-3 space-y-2 text-sm">
+            {membersInThisCrew.map((m) => {
+              const isLeader = crew.leader_member_id && m.id === crew.leader_member_id;
 
-                return (
-                  <li
-                    key={m.id}
-                    className="flex flex-col gap-2 rounded-xl border border-border/60 bg-background/40 px-3 py-2 md:flex-row md:items-center md:justify-between"
-                  >
-                    <div className="flex items-center gap-2">
-                      {isLeader && (
-                        <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
-                          <Crown className="mr-1 h-3 w-3" />
-                          Lider
-                        </span>
-                      )}
-                      <div className="flex flex-col">
-                        <span className="font-medium text-foreground">
-                          {m.first_name} {m.last_name}
-                        </span>
-                        <span className="text-xs text-muted-foreground">
-                          {m.email} {m.phone ? `• ${m.phone}` : ""}
-                        </span>
-                      </div>
+              return (
+                <li
+                  key={m.id}
+                  className="flex flex-col gap-2 rounded-xl border border-border/60 bg-background/40 px-3 py-2 md:flex-row md:items-center md:justify-between"
+                >
+                  <div className="flex items-center gap-2">
+                    {isLeader && (
+                      <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
+                        <Crown className="mr-1 h-3 w-3" />
+                        Lider
+                      </span>
+                    )}
+                    <div className="flex flex-col">
+                      <span className="font-medium text-foreground">
+                        {m.first_name} {m.last_name}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {m.email} {m.phone ? `• ${m.phone}` : ""}
+                      </span>
                     </div>
+                  </div>
 
+                  {/* ✅ Akcje na członkach tylko dla canManageCrews */}
+                  {canManageCrews && (
                     <div className="flex flex-wrap items-center gap-2 md:justify-end">
-                      {/* Usuń z brygady (wolny strzelec) */}
                       <form action={unassignMemberAction}>
                         <input type="hidden" name="memberId" value={m.id} />
                         <input type="hidden" name="crewId" value={crew.id} />
@@ -362,17 +421,9 @@ export default async function CrewDetailPage(props: PageProps) {
                         </button>
                       </form>
 
-                      {/* Szybkie przeniesienie do innej brygady */}
                       {otherCrews.length > 0 && (
-                        <form
-                          action={moveMemberAction}
-                          className="flex items-center gap-1"
-                        >
-                          <input
-                            type="hidden"
-                            name="memberId"
-                            value={m.id}
-                          />
+                        <form action={moveMemberAction} className="flex items-center gap-1">
+                          <input type="hidden" name="memberId" value={m.id} />
                           <input type="hidden" name="crewId" value={crew.id} />
                           <select
                             name="targetCrewId"
@@ -398,13 +449,13 @@ export default async function CrewDetailPage(props: PageProps) {
                         </form>
                       )}
                     </div>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
-      </section>
-    </RoleGuard>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </section>
   );
 }

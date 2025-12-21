@@ -1,8 +1,10 @@
+// src/app/(app)/tasks/actions.ts
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { redirect } from "next/navigation";
+import { createClient } from "@supabase/supabase-js";
 import { supabaseServer } from "@/lib/supabaseServer";
+import { PERM, can, type PermissionSnapshot } from "@/lib/permissions";
 
 async function db() {
   return await supabaseServer();
@@ -10,70 +12,288 @@ async function db() {
 
 type TaskStatus = "todo" | "in_progress" | "done";
 
+const TASK_BUCKET = "task-images";
+const MAX_TASK_PHOTOS = 3;
+
 /* -------------------------------------------------------------------------- */
-/*                  CREATE TASK z widoku „Moje zadania”                       */
+/*                           STORAGE (SERVICE ROLE)                           */
 /* -------------------------------------------------------------------------- */
+
+const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+
+function storageAdmin() {
+  if (!url || !serviceKey) {
+    throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  }
+  return createClient(url, serviceKey, { auth: { persistSession: false } });
+}
+
+/* -------------------------------------------------------------------------- */
+/*                         PERMISSIONS (SERVER GATE)                          */
+/* -------------------------------------------------------------------------- */
+
+async function fetchMyPermissionsSnapshot(
+  supabase: Awaited<ReturnType<typeof db>>
+): Promise<PermissionSnapshot | null> {
+  const { data, error } = await supabase.rpc("my_permissions_snapshot");
+  if (error) {
+    console.error("my_permissions_snapshot error:", error);
+    return null;
+  }
+  const snap = Array.isArray(data) ? (data[0] ?? null) : (data ?? null);
+  return (snap as PermissionSnapshot | null) ?? null;
+}
+
+function deny(msg = "Brak uprawnień."): never {
+  throw new Error(msg);
+}
+
+function requirePerm(
+  snapshot: PermissionSnapshot | null,
+  p: (typeof PERM)[keyof typeof PERM],
+  msg?: string
+) {
+  if (!can(snapshot, p)) deny(msg ?? "Brak uprawnień.");
+}
+
+function requireAny(
+  snapshot: PermissionSnapshot | null,
+  perms: ((typeof PERM)[keyof typeof PERM])[],
+  msg?: string
+) {
+  const ok = perms.some((p) => can(snapshot, p as any));
+  if (!ok) deny(msg ?? "Brak uprawnień.");
+}
+
+/* -------------------------------------------------------------------------- */
+/*                                 HELPERS                                    */
+/* -------------------------------------------------------------------------- */
+
+function cleanStr(v: unknown): string {
+  return String(v ?? "").trim();
+}
+
+function isImageFile(x: unknown): x is File {
+  return (
+    typeof x === "object" &&
+    x instanceof File &&
+    x.size > 0 &&
+    (x.type ?? "").startsWith("image/")
+  );
+}
+
+function formFileList(formData: FormData, key: string): File[] {
+  const raw = formData.getAll(key);
+  const files = raw.filter(isImageFile);
+  return files.filter((f) => typeof f.name === "string" && f.name.length > 0);
+}
+
+async function getCurrentUserId(supabase: Awaited<ReturnType<typeof db>>) {
+  const { data, error } = await supabase.auth.getUser();
+  if (error) {
+    console.error("auth.getUser error:", error);
+    throw new Error("Problem z sesją użytkownika.");
+  }
+  const userId = data?.user?.id ?? null;
+  if (!userId) throw new Error("Brak sesji użytkownika.");
+  return userId;
+}
+
+async function getMyAccountId(
+  supabase: Awaited<ReturnType<typeof db>>,
+  userId: string
+) {
+  // Kanon: user.id == auth.user.id; tabela users trzyma account_id
+  const { data, error } = await supabase
+    .from("users")
+    .select("account_id")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("getMyAccountId error:", error);
+    throw new Error("Nie udało się pobrać account_id.");
+  }
+
+  const accountId = (data as any)?.account_id as string | null;
+  if (!accountId) throw new Error("Brak account_id.");
+  return accountId;
+}
+
+async function getTaskPlaceId(
+  supabase: Awaited<ReturnType<typeof db>>,
+  taskId: string
+): Promise<string | null> {
+  const { data, error } = await supabase
+    .from("project_tasks")
+    .select("place_id")
+    .eq("id", taskId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("getTaskPlaceId error:", error);
+    return null;
+  }
+  return (data as any)?.place_id ?? null;
+}
+
+async function countExistingAttachments(
+  supabase: Awaited<ReturnType<typeof db>>,
+  taskId: string
+): Promise<number> {
+  const { count, error } = await supabase
+    .from("task_attachments")
+    .select("id", { count: "exact", head: true })
+    .eq("task_id", taskId);
+
+  if (error) {
+    console.error("countExistingAttachments error:", error);
+    return 0;
+  }
+
+  return typeof count === "number" ? count : 0;
+}
+
+async function refreshTaskPhotosCompat(
+  supabase: Awaited<ReturnType<typeof db>>,
+  taskId: string
+) {
+  const { data, error } = await supabase
+    .from("task_attachments")
+    .select("url")
+    .eq("task_id", taskId);
+
+  if (error) {
+    console.error("refreshTaskPhotosCompat read attachments error:", error);
+    return;
+  }
+
+  const paths = (data ?? [])
+    .map((r: any) => String(r.url ?? "").trim())
+    .filter(Boolean);
+
+  const publicUrls = paths
+    .map((path) => {
+      const { data: urlData } = supabase.storage.from(TASK_BUCKET).getPublicUrl(path);
+      return urlData?.publicUrl ?? null;
+    })
+    .filter(Boolean) as string[];
+
+  const { error: upErr } = await supabase
+    .from("project_tasks")
+    .update({ photos: publicUrls })
+    .eq("id", taskId)
+    .limit(1);
+
+  if (upErr) {
+    console.error("refreshTaskPhotosCompat update project_tasks.photos error:", upErr);
+  }
+}
+
 /**
- * Tworzenie zadania z zakładki /tasks:
- * - Miejsce (place_id) jest wymagane.
- * - Można przypisać:
- *    • tylko brygadę (assigned_crew_id),
- *    • tylko osobę (assigned_member_id),
- *    • brygadę + osobę (osoba ważniejsza przy logice pracownika).
- * - Zadanie startuje ze statusem "todo".
- * - Można dodać max 3 zdjęcia (bucket: task-images).
+ * Upload do Storage robimy SERVICE ROLE (żeby nie wywalało na RLS storage.objects),
+ * ale zapis do task_attachments i update project_tasks zostają na supabaseServer()
+ * (czyli dalej trzymasz multi-tenant i permsy po stronie DB).
+ *
+ * KLUCZ: ścieżka pliku MUSI być taka sama jak w module Obiekt:
+ *   <accountId>/tasks/<taskId>/...
+ */
+async function uploadAndAttachPhotos(
+  supabase: Awaited<ReturnType<typeof db>>,
+  taskId: string,
+  files: File[],
+  accountId: string
+) {
+  if (!files || files.length === 0) return;
+
+  const existingCount = await countExistingAttachments(supabase, taskId);
+  if (existingCount >= MAX_TASK_PHOTOS) return;
+
+  const remaining = Math.max(0, MAX_TASK_PHOTOS - existingCount);
+  const toUpload = files.slice(0, remaining);
+
+  const admin = storageAdmin();
+
+  for (const file of toUpload) {
+    const safeName = String(file.name || "file").replace(/[^\w.\-]+/g, "_");
+    const path = `${accountId}/tasks/${taskId}/${Date.now()}-${safeName}`;
+
+    const { error: upErr } = await admin.storage.from(TASK_BUCKET).upload(path, file, {
+      upsert: false,
+      contentType: (file as any)?.type || undefined,
+      cacheControl: "3600",
+    });
+
+    if (upErr) {
+      console.error("uploadAndAttachPhotos upload error:", upErr);
+      continue;
+    }
+
+    const { error: insErr } = await supabase
+      .from("task_attachments")
+      .insert({ task_id: taskId, url: path });
+
+    if (insErr) {
+      console.error("uploadAndAttachPhotos insert attachment error:", insErr);
+      await admin.storage.from(TASK_BUCKET).remove([path]).catch(() => {});
+      continue;
+    }
+  }
+
+  await refreshTaskPhotosCompat(supabase, taskId);
+}
+
+/* -------------------------------------------------------------------------- */
+/*                         CREATE TASK – /tasks (global)                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Tylko foreman/manager/owner (czyli ci, którzy mają permsy manage/assign).
  */
 export async function createTaskGlobal(formData: FormData) {
   const supabase = await db();
+  const snapshot = await fetchMyPermissionsSnapshot(supabase);
 
-  const { data: auth, error: authError } = await supabase.auth.getUser();
-  if (authError) {
-    console.error("createTaskGlobal getUser error:", authError);
-    throw new Error("Problem z sesją użytkownika.");
-  }
-  if (!auth?.user) {
-    throw new Error("Brak sesji użytkownika.");
+  requireAny(
+    snapshot,
+    [PERM.TASKS_UPDATE_ALL, PERM.TASKS_ASSIGN],
+    "Brak uprawnień do tworzenia zadań."
+  );
+
+  const files = formFileList(formData, "photos");
+  if (files.length) {
+    requirePerm(snapshot, PERM.TASKS_UPLOAD_PHOTOS, "Brak uprawnień do uploadu zdjęć.");
   }
 
-  const title = String(formData.get("title") ?? "").trim();
+  const userId = await getCurrentUserId(supabase);
+  const accountId = await getMyAccountId(supabase, userId);
+
+  const title = cleanStr(formData.get("title"));
   const descriptionRaw = String(formData.get("description") ?? "");
-  const description =
-    descriptionRaw.trim().length > 0 ? descriptionRaw.trim() : null;
+  const description = descriptionRaw.trim().length ? descriptionRaw.trim() : null;
 
-  const placeId = String(formData.get("place_id") ?? "").trim();
+  const placeId = cleanStr(formData.get("place_id"));
+  const assignedCrewIdRaw = cleanStr(formData.get("assigned_crew_id"));
+  const assignedMemberIdRaw = cleanStr(formData.get("assigned_member_id"));
 
-  const assignedCrewIdRaw = String(
-    formData.get("assigned_crew_id") ?? ""
-  ).trim();
-  const assignedMemberIdRaw = String(
-    formData.get("assigned_member_id") ?? ""
-  ).trim();
+  if (!title) throw new Error("Tytuł zadania jest wymagany.");
+  if (!placeId) throw new Error("Miejsce jest wymagane.");
 
-  if (!title) {
-    throw new Error("Tytuł zadania jest wymagany.");
-  }
-  if (!placeId) {
-    throw new Error("Miejsce jest wymagane.");
-  }
-
-  const assigned_crew_id = assignedCrewIdRaw || null;
-  const assigned_member_id = assignedMemberIdRaw || null;
-
-  // Payload podstawowy
   const payload: Record<string, unknown> = {
     place_id: placeId,
     title,
     description,
     status: "todo",
-    created_by: auth.user.id,
+    created_by: userId,
   };
 
-  // Jeśli wybrano osobę – ona jest najważniejsza
+  const assigned_crew_id = assignedCrewIdRaw || null;
+  const assigned_member_id = assignedMemberIdRaw || null;
+
   if (assigned_member_id) {
     payload.assigned_member_id = assigned_member_id;
-    if (assigned_crew_id) {
-      payload.assigned_crew_id = assigned_crew_id;
-    }
+    if (assigned_crew_id) payload.assigned_crew_id = assigned_crew_id;
   } else if (assigned_crew_id) {
     payload.assigned_crew_id = assigned_crew_id;
   }
@@ -89,433 +309,259 @@ export async function createTaskGlobal(formData: FormData) {
     throw new Error("Nie udało się utworzyć zadania.");
   }
 
-  const taskId = data.id as string;
-  const pId = (data.place_id as string) ?? placeId;
+  const taskId = String((data as any).id);
+  const pId = String((data as any).place_id ?? placeId);
 
-  // --- UPLOAD ZDJĘĆ (opcjonalnie, max 3) ---
-  const files = formData.getAll("photos") as File[];
-  const uploadedUrls: string[] = [];
-
-  if (files && files.length > 0) {
-    const maxFiles = 3;
-    const filesToUpload = files.slice(0, maxFiles);
-
-    for (const file of filesToUpload) {
-      if (!file || typeof file.name !== "string") continue;
-
-      const path = `tasks/${taskId}/${Date.now()}-${file.name}`;
-
-      const { error: uploadError } = await supabase.storage
-        .from("task-images")
-        .upload(path, file);
-
-      if (uploadError) {
-        console.error("createTaskGlobal upload error:", uploadError);
-        continue;
-      }
-
-      const { data: urlData } = supabase.storage
-        .from("task-images")
-        .getPublicUrl(path);
-
-      if (urlData?.publicUrl) {
-        uploadedUrls.push(urlData.publicUrl);
-      }
-    }
+  if (files.length) {
+    await uploadAndAttachPhotos(supabase, taskId, files, accountId);
   }
 
-  if (uploadedUrls.length > 0) {
-    const { error: photosError } = await supabase
-      .from("project_tasks")
-      .update({ photos: uploadedUrls })
-      .eq("id", taskId)
-      .limit(1);
-
-    if (photosError) {
-      console.error("createTaskGlobal photos update error:", photosError);
-      // zadanie istnieje – nie przerywamy całej akcji
-    }
-  }
-
-  // Odśwież widoki listy i szczegółu
   revalidatePath("/tasks");
   revalidatePath(`/tasks/${taskId}`);
-  if (pId) {
-    revalidatePath(`/object/${pId}`);
-  }
+  if (pId) revalidatePath(`/object/${pId}`);
 
-  // Bez redirectu – zostajemy na /tasks, lista sama się odświeży
   return taskId;
 }
 
-/**
- * Update zadania z panelu menedżera:
- * - tytuł
- * - opis
- * - status
- * - przypisana brygada
- * - przypisana osoba
- * - zdjęcia (max 3, dopisywane do istniejących)
- *
- * Zdjęcia są trzymane w bucketcie "task-images" pod ścieżką:
- *   tasks/<taskId>/<timestamp>-<filename>
- */
+/* -------------------------------------------------------------------------- */
+/*                      CREATE TASK – /object (place locked)                   */
+/* -------------------------------------------------------------------------- */
+
+export async function createTaskForPlace(formData: FormData) {
+  return await createTaskGlobal(formData);
+}
+
+/* -------------------------------------------------------------------------- */
+/*                         UPDATE TASK – panel menedżera                       */
+/* -------------------------------------------------------------------------- */
+
 export async function updateTaskManager(formData: FormData) {
-  const taskId = String(formData.get("task_id") ?? "").trim();
+  const supabase = await db();
+  const snapshot = await fetchMyPermissionsSnapshot(supabase);
+
+  requireAny(
+    snapshot,
+    [PERM.TASKS_UPDATE_ALL, PERM.TASKS_ASSIGN],
+    "Brak uprawnień do edycji zadań."
+  );
+
+  const taskId = cleanStr(formData.get("task_id"));
   if (!taskId) throw new Error("Brak task_id.");
 
-  const statusRaw = String(formData.get("status") ?? "").trim();
+  const userId = await getCurrentUserId(supabase);
+  const accountId = await getMyAccountId(supabase, userId);
+
+  const titleRaw = cleanStr(formData.get("title"));
+  const descriptionRaw = String(formData.get("description") ?? "");
+  const description = descriptionRaw.trim().length ? descriptionRaw.trim() : null;
+
+  const statusRaw = cleanStr(formData.get("status"));
   const status: TaskStatus = (statusRaw as TaskStatus) || "todo";
 
-  const assignedCrewIdRaw = String(
-    formData.get("assigned_crew_id") ?? ""
-  ).trim();
-  const assignedCrewId = assignedCrewIdRaw || null;
+  const assignedCrewIdRaw = cleanStr(formData.get("assigned_crew_id"));
+  const assignedMemberIdRaw = cleanStr(formData.get("assigned_member_id"));
 
-  const assignedMemberIdRaw = String(
-    formData.get("assigned_member_id") ?? ""
-  ).trim();
-  const assignedMemberId = assignedMemberIdRaw || null;
+  const assigned_crew_id = assignedCrewIdRaw || null;
+  const assigned_member_id = assignedMemberIdRaw || null;
 
-  const titleRaw = String(formData.get("title") ?? "").trim();
-  const descriptionRaw = String(formData.get("description") ?? "");
+  const updatePayload: Record<string, unknown> = { status };
+  if (titleRaw) updatePayload.title = titleRaw;
+  updatePayload.description = description;
 
-  // pliki zdjęć (mogą nie być wysłane)
-  const files = formData.getAll("photos") as File[];
-
-  const supabase = await db();
-
-  // 1) wczytujemy obecne zdjęcia + place_id
-  const { data: existingRow, error: existingError } = await supabase
-    .from("project_tasks")
-    .select("photos, place_id")
-    .eq("id", taskId)
-    .maybeSingle();
-
-  if (existingError) {
-    console.error("updateTaskManager existingRow error:", existingError);
-    throw new Error("Nie udało się pobrać zadania.");
-  }
-  if (!existingRow) {
-    throw new Error("Zadanie nie istnieje.");
+  if (assigned_member_id) {
+    updatePayload.assigned_member_id = assigned_member_id;
+    updatePayload.assigned_crew_id = assigned_crew_id;
+  } else {
+    updatePayload.assigned_member_id = null;
+    updatePayload.assigned_crew_id = assigned_crew_id;
   }
 
-  let currentPhotos: string[] = [];
-  if (Array.isArray((existingRow as any).photos)) {
-    currentPhotos = (existingRow as any).photos.filter(
-      (p: unknown): p is string => typeof p === "string"
-    );
-  }
-
-  const placeId: string | null = (existingRow as any).place_id ?? null;
-
-  // 2) upload nowych zdjęć (max 3) do bucketa "task-images"
-  const uploadedUrls: string[] = [];
-
-  if (files && files.length > 0) {
-    const maxFiles = 3;
-    const filesToUpload = files.slice(0, maxFiles);
-
-    for (const file of filesToUpload) {
-      if (!file || typeof file.name !== "string") continue;
-
-      const path = `tasks/${taskId}/${Date.now()}-${file.name}`;
-
-      const { error: uploadError } = await supabase.storage
-        .from("task-images")
-        .upload(path, file);
-
-      if (uploadError) {
-        console.error("updateTaskManager upload error:", uploadError);
-        continue;
-      }
-
-      const { data: urlData } = supabase.storage
-        .from("task-images")
-        .getPublicUrl(path);
-
-      if (urlData?.publicUrl) {
-        uploadedUrls.push(urlData.publicUrl);
-      }
-    }
-  }
-
-  const mergedPhotos = [...currentPhotos, ...uploadedUrls].slice(0, 3);
-
-  // 3) payload do update
-  const updatePayload: Record<string, any> = {
-    status,
-    assigned_crew_id: assignedCrewId,
-    assigned_member_id: assignedMemberId,
-    photos: mergedPhotos,
-  };
-
-  if (titleRaw) {
-    updatePayload.title = titleRaw;
-  }
-  if (descriptionRaw.trim().length > 0) {
-    updatePayload.description = descriptionRaw.trim();
-  }
-
-  const { error: updateError } = await supabase
+  const { data: row, error } = await supabase
     .from("project_tasks")
     .update(updatePayload)
     .eq("id", taskId)
-    .limit(1);
-
-  if (updateError) {
-    console.error("updateTaskManager update error:", updateError);
-    throw new Error("Nie udało się zaktualizować zadania.");
-  }
-
-  // 4) odśwież widoki
-  revalidatePath(`/tasks/${taskId}`);
-  revalidatePath("/tasks");
-  if (placeId) {
-    revalidatePath(`/object/${placeId}`);
-  }
-}
-
-/**
- * Usuwanie pojedynczego zdjęcia:
- * - usuwa plik ze storage "task-images"
- * - wyrzuca URL z tablicy photos w project_tasks
- */
-export async function deleteTaskPhoto(formData: FormData) {
-  const taskId = String(formData.get("task_id") ?? "").trim();
-  const photoUrl = String(formData.get("photo_url") ?? "").trim();
-
-  if (!taskId) throw new Error("Brak task_id.");
-  if (!photoUrl) return;
-
-  const supabase = await db();
-
-  // 1) pobierz current photos + place_id
-  const { data: existingRow, error: existingError } = await supabase
-    .from("project_tasks")
-    .select("photos, place_id")
-    .eq("id", taskId)
+    .select("id, place_id")
     .maybeSingle();
 
-  if (existingError) {
-    console.error("deleteTaskPhoto existingRow error:", existingError);
-    throw new Error("Nie udało się pobrać zadania.");
-  }
-  if (!existingRow) {
-    throw new Error("Zadanie nie istnieje.");
+  if (error) {
+    console.error("updateTaskManager update error:", error);
+    throw new Error("Nie udało się zapisać zmian.");
   }
 
-  let currentPhotos: string[] = [];
-  if (Array.isArray((existingRow as any).photos)) {
-    currentPhotos = (existingRow as any).photos.filter(
-      (p: unknown): p is string => typeof p === "string"
-    );
+  const placeId: string | null =
+    (row as any)?.place_id ?? (await getTaskPlaceId(supabase, taskId));
+
+  const files = formFileList(formData, "photos");
+  if (files.length) {
+    requirePerm(snapshot, PERM.TASKS_UPLOAD_PHOTOS, "Brak uprawnień do uploadu zdjęć.");
+    await uploadAndAttachPhotos(supabase, taskId, files, accountId);
   }
 
-  const placeId: string | null = (existingRow as any).place_id ?? null;
-
-  // 2) wylicz ścieżkę w buckecie z URL-a
-  let storagePath: string | null = null;
-  try {
-    const url = new URL(photoUrl);
-    const marker = "/object/public/task-images/";
-    const idx = url.pathname.indexOf(marker);
-    if (idx !== -1) {
-      storagePath = url.pathname.slice(idx + marker.length);
-    } else {
-      // fallback: szukamy /task-images/
-      const altMarker = "/task-images/";
-      const idx2 = url.pathname.indexOf(altMarker);
-      if (idx2 !== -1) {
-        storagePath = url.pathname.slice(idx2 + altMarker.length);
-      }
-    }
-  } catch (e) {
-    console.error("deleteTaskPhoto URL parse error:", e);
-  }
-
-  if (storagePath) {
-    const { error: removeError } = await supabase.storage
-      .from("task-images")
-      .remove([storagePath]);
-
-    if (removeError) {
-      console.error("deleteTaskPhoto remove error:", removeError);
-      // nie przerywamy – nadal usuwamy z DB
-    }
-  }
-
-  // 3) wyrzuć URL z tablicy
-  const newPhotos = currentPhotos.filter((p) => p !== photoUrl);
-
-  const { error: updateError } = await supabase
-    .from("project_tasks")
-    .update({ photos: newPhotos })
-    .eq("id", taskId)
-    .limit(1);
-
-  if (updateError) {
-    console.error("deleteTaskPhoto update error:", updateError);
-    throw new Error("Nie udało się zaktualizować zadania po usunięciu zdjęcia.");
-  }
-
-  // 4) rewalidacja widoków
-  revalidatePath(`/tasks/${taskId}`);
   revalidatePath("/tasks");
-  if (placeId) {
-    revalidatePath(`/object/${placeId}`);
-  }
+  revalidatePath(`/tasks/${taskId}`);
+  if (placeId) revalidatePath(`/object/${placeId}`);
+
+  return taskId;
 }
 
-/**
- * Dedykowana akcja do uploadu zdjęć z klienta (drag&drop + kolejne wybory),
- * pilnująca limitu 3 zdjęć łącznie na zadanie.
- */
+/* -------------------------------------------------------------------------- */
+/*                         UPLOAD PHOTOS – dla uploaderów                      */
+/* -------------------------------------------------------------------------- */
+
 export async function uploadTaskPhotos(formData: FormData) {
+  const supabase = await db();
+  const snapshot = await fetchMyPermissionsSnapshot(supabase);
+
+  requirePerm(snapshot, PERM.TASKS_UPLOAD_PHOTOS, "Brak uprawnień do uploadu zdjęć.");
+
   const taskId = String(formData.get("task_id") ?? "").trim();
   if (!taskId) throw new Error("Brak task_id.");
 
-  const files = formData.getAll("photos") as File[];
-  if (!files || files.length === 0) {
-    return;
-  }
+  const files = formFileList(formData, "photos");
+  if (!files || files.length === 0) return;
 
-  const supabase = await db();
+  const already = await countExistingAttachments(supabase, taskId);
+  const remaining = Math.max(0, MAX_TASK_PHOTOS - already);
+  if (remaining <= 0) return;
 
-  // obecne zdjęcia + place_id
-  const { data: existingRow, error: existingError } = await supabase
-    .from("project_tasks")
-    .select("photos, place_id")
-    .eq("id", taskId)
-    .maybeSingle();
+  const toUpload = files.slice(0, remaining);
 
-  if (existingError) {
-    console.error("uploadTaskPhotos existingRow error:", existingError);
-    throw new Error("Nie udało się pobrać zadania.");
-  }
-  if (!existingRow) {
-    throw new Error("Zadanie nie istnieje.");
-  }
+  const userId = await getCurrentUserId(supabase);
+  const accountId = await getMyAccountId(supabase, userId);
 
-  let currentPhotos: string[] = [];
-  if (Array.isArray((existingRow as any).photos)) {
-    currentPhotos = (existingRow as any).photos.filter(
-      (p: unknown): p is string => typeof p === "string"
-    );
-  }
+  const admin = storageAdmin();
+  const rowsToInsert: { task_id: string; url: string }[] = [];
 
-  const placeId: string | null = (existingRow as any).place_id ?? null;
-  const maxTotal = 3;
+  for (const file of toUpload) {
+    const safeName = String(file.name || "file").replace(/[^\w.\-]+/g, "_");
+    const path = `${accountId}/tasks/${taskId}/${Date.now()}-${safeName}`;
 
-  if (currentPhotos.length >= maxTotal) {
-    // już pełny limit
-    return;
-  }
+    const { error: uploadErr } = await admin.storage.from(TASK_BUCKET).upload(path, file, {
+      upsert: false,
+      contentType: (file as any)?.type || undefined,
+      cacheControl: "3600",
+    });
 
-  const remainingSlots = maxTotal - currentPhotos.length;
-  const filesToUpload = files.slice(0, remainingSlots);
-
-  const uploadedUrls: string[] = [];
-
-  for (const file of filesToUpload) {
-    if (!file || typeof file.name !== "string") continue;
-
-    const path = `tasks/${taskId}/${Date.now()}-${file.name}`;
-
-    const { error: uploadError } = await supabase.storage
-      .from("task-images")
-      .upload(path, file);
-
-    if (uploadError) {
-      console.error("uploadTaskPhotos upload error:", uploadError);
+    if (uploadErr) {
+      console.error("uploadTaskPhotos storage upload error:", uploadErr);
       continue;
     }
 
-    const { data: urlData } = supabase.storage
-      .from("task-images")
-      .getPublicUrl(path);
-
-    if (urlData?.publicUrl) {
-      uploadedUrls.push(urlData.publicUrl);
-    }
+    rowsToInsert.push({ task_id: taskId, url: path });
   }
 
-  if (uploadedUrls.length === 0) {
+  if (rowsToInsert.length === 0) return;
+
+  const { error: insErr } = await supabase.from("task_attachments").insert(rowsToInsert);
+  if (insErr) {
+    console.error("uploadTaskPhotos insert task_attachments error:", insErr);
+    await admin
+      .storage
+      .from(TASK_BUCKET)
+      .remove(rowsToInsert.map((r) => r.url))
+      .catch(() => {});
+    throw new Error("Nie udało się zapisać zdjęć w bazie.");
+  }
+
+  await refreshTaskPhotosCompat(supabase, taskId);
+
+  const placeId = await getTaskPlaceId(supabase, taskId);
+
+  revalidatePath(`/tasks/${taskId}`);
+  revalidatePath("/tasks");
+  if (placeId) revalidatePath(`/object/${placeId}`);
+}
+
+/* -------------------------------------------------------------------------- */
+/*                         DELETE PHOTO – ze strony taska                      */
+/* -------------------------------------------------------------------------- */
+
+export async function deleteTaskPhoto(formData: FormData) {
+  const supabase = await db();
+  const snapshot = await fetchMyPermissionsSnapshot(supabase);
+
+  requirePerm(snapshot, PERM.TASKS_UPDATE_ALL, "Brak uprawnień do usuwania zdjęć.");
+
+  const taskId = cleanStr(formData.get("task_id"));
+  if (!taskId) throw new Error("Brak task_id.");
+
+  const photoId = cleanStr(formData.get("photo_id"));
+  const photoPath = cleanStr(formData.get("photo_path")) || cleanStr(formData.get("photo_url"));
+
+  let pathToRemove: string | null = null;
+
+  if (photoId) {
+    const { data, error } = await supabase
+      .from("task_attachments")
+      .select("url")
+      .eq("id", photoId)
+      .eq("task_id", taskId)
+      .maybeSingle();
+
+    if (error) console.error("deleteTaskPhoto read attachment by id error:", error);
+    pathToRemove = (data as any)?.url ? String((data as any).url) : null;
+
+    const { error: delErr } = await supabase
+      .from("task_attachments")
+      .delete()
+      .eq("id", photoId)
+      .eq("task_id", taskId);
+
+    if (delErr) console.error("deleteTaskPhoto delete attachment by id error:", delErr);
+  } else if (photoPath) {
+    pathToRemove = photoPath;
+
+    const { error: delErr } = await supabase
+      .from("task_attachments")
+      .delete()
+      .eq("task_id", taskId)
+      .eq("url", photoPath);
+
+    if (delErr) console.error("deleteTaskPhoto delete attachment by path error:", delErr);
+  } else {
     return;
   }
 
-  const newPhotos = [...currentPhotos, ...uploadedUrls].slice(0, maxTotal);
-
-  const { error: updateError } = await supabase
-    .from("project_tasks")
-    .update({ photos: newPhotos })
-    .eq("id", taskId)
-    .limit(1);
-
-  if (updateError) {
-    console.error("uploadTaskPhotos update error:", updateError);
-    throw new Error("Nie udało się zaktualizować zdjęć zadania.");
+  if (pathToRemove) {
+    const admin = storageAdmin();
+    const { error: rmErr } = await admin.storage.from(TASK_BUCKET).remove([pathToRemove]);
+    if (rmErr) console.error("deleteTaskPhoto storage remove error:", rmErr);
   }
 
-  // rewalidacja
-  revalidatePath(`/tasks/${taskId}`);
+  await refreshTaskPhotosCompat(supabase, taskId);
+
+  const placeId = await getTaskPlaceId(supabase, taskId);
+
   revalidatePath("/tasks");
-  if (placeId) {
-    revalidatePath(`/object/${placeId}`);
-  }
+  revalidatePath(`/tasks/${taskId}`);
+  if (placeId) revalidatePath(`/object/${placeId}`);
 }
 
-/**
- * Soft delete zadania:
- * - ustawia deleted_at = now()
- * - NIE rusza powiązań (raporty dzienne, itp.)
- * - dzięki temu w przyszłości raporty mogą nadal linkować do tego zadania
- */
+/* -------------------------------------------------------------------------- */
+/*                         SOFT DELETE TASK                                    */
+/* -------------------------------------------------------------------------- */
+
 export async function softDeleteTask(formData: FormData) {
-  const taskId = String(formData.get("task_id") ?? "").trim();
+  const supabase = await db();
+  const snapshot = await fetchMyPermissionsSnapshot(supabase);
+
+  requirePerm(snapshot, PERM.TASKS_UPDATE_ALL, "Brak uprawnień do usuwania zadań.");
+
+  const taskId = cleanStr(formData.get("task_id"));
   if (!taskId) throw new Error("Brak task_id.");
 
-  const supabase = await db();
+  const placeId = await getTaskPlaceId(supabase, taskId);
 
-  // potrzebujemy place_id do rewalidacji i redirectu
-  const { data: existingRow, error: existingError } = await supabase
-    .from("project_tasks")
-    .select("place_id")
-    .eq("id", taskId)
-    .maybeSingle();
-
-  if (existingError) {
-    console.error("softDeleteTask existingRow error:", existingError);
-    throw new Error("Nie udało się pobrać zadania.");
-  }
-  if (!existingRow) {
-    throw new Error("Zadanie nie istnieje.");
-  }
-
-  const placeId: string | null = (existingRow as any).place_id ?? null;
-
-  const { error: updateError } = await supabase
+  const { error } = await supabase
     .from("project_tasks")
     .update({ deleted_at: new Date().toISOString() })
-    .eq("id", taskId)
-    .is("deleted_at", null)
-    .limit(1);
+    .eq("id", taskId);
 
-  if (updateError) {
-    console.error("softDeleteTask update error:", updateError);
+  if (error) {
+    console.error("softDeleteTask error:", error);
     throw new Error("Nie udało się usunąć zadania.");
   }
 
-  // odśwież listy
   revalidatePath("/tasks");
-  if (placeId) {
-    revalidatePath(`/object/${placeId}`);
-  }
-
-  // przekierowanie po usunięciu:
-  if (placeId) {
-    redirect(`/object/${placeId}`);
-  }
-
-  redirect("/tasks");
+  if (placeId) revalidatePath(`/object/${placeId}`);
 }

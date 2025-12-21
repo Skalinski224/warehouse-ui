@@ -1,8 +1,10 @@
 // src/app/(app)/deliveries/_components/DeliveryItemsEditor.tsx
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
+import RoleGuard from "@/components/RoleGuard";
+import { PERM } from "@/lib/permissions";
 
 export type DeliveryItemDraft = {
   material_id: string;
@@ -30,7 +32,7 @@ type Props = {
   enableSearch?: boolean;
 };
 
-export default function DeliveryItemsEditor({
+function DeliveryItemsEditorInner({
   items,
   onChange,
   enableSearch = true,
@@ -60,7 +62,7 @@ export default function DeliveryItemsEditor({
   function updateItemQty(index: number, raw: string) {
     const qty = Number((raw || "0").replace(",", "."));
     const next = items.map((it, i) =>
-      i === index ? { ...it, qty: isNaN(qty) ? 0 : qty } : it
+      i === index ? { ...it, qty: Number.isNaN(qty) ? 0 : qty } : it
     );
     onChange(next);
   }
@@ -68,7 +70,9 @@ export default function DeliveryItemsEditor({
   function updateItemPrice(index: number, raw: string) {
     const price = Number((raw || "0").replace(",", "."));
     const next = items.map((it, i) =>
-      i === index ? { ...it, unit_price: isNaN(price) ? 0 : price } : it
+      i === index
+        ? { ...it, unit_price: Number.isNaN(price) ? 0 : price }
+        : it
     );
     onChange(next);
   }
@@ -83,43 +87,56 @@ export default function DeliveryItemsEditor({
     0
   );
 
-  /* ----------------------------- WYSZUKIWANIE MATERIAŁÓW ----------------------------- */
+  /* ----------------------------- WYSZUKIWANIE MATERIAŁÓW (LIVE) ----------------------------- */
 
-  async function searchMaterials() {
+  useEffect(() => {
     if (!enableSearch) return;
 
     const q = query.trim();
+
+    // pusty input -> czyścimy wyniki i błędy
     if (!q) {
       setResults([]);
+      setErrorMsg(null);
+      setLoading(false);
       return;
     }
 
     setLoading(true);
     setErrorMsg(null);
 
-    const { data, error } = await supabase
-      .from("materials")
-      .select("id, title, unit")
-      .ilike("title", `%${q}%`)
-      .is("deleted_at", null)
-      .order("title", { ascending: true })
-      .limit(30);
+    const handle = setTimeout(async () => {
+      const { data, error } = await supabase
+        .from("v_materials_overview")
+        .select("id,title,unit,deleted_at")
+        .ilike("title", `%${q}%`)
+        .is("deleted_at", null)
+        .order("title", { ascending: true })
+        .limit(30);
 
-    if (error) {
-      console.warn("DeliveryItemsEditor: search error", error.message ?? error);
-      setErrorMsg("Nie udało się pobrać materiałów. Spróbuj ponownie.");
-      setResults([]);
-    } else {
+      if (error) {
+        console.warn(
+          "DeliveryItemsEditor: search error",
+          (error as any).message ?? error
+        );
+        setErrorMsg("Nie udało się pobrać materiałów. Spróbuj ponownie.");
+        setResults([]);
+        setLoading(false);
+        return;
+      }
+
       const mapped: MaterialOption[] = ((data ?? []) as any[]).map((m) => ({
         id: m.id as string,
         title: m.title as string,
         unit: (m.unit as string) ?? null,
       }));
-      setResults(mapped);
-    }
 
-    setLoading(false);
-  }
+      setResults(mapped);
+      setLoading(false);
+    }, 300); // debounce 300 ms
+
+    return () => clearTimeout(handle);
+  }, [query, enableSearch, supabase]);
 
   /* --------------------------------- RENDER --------------------------------- */
 
@@ -127,27 +144,25 @@ export default function DeliveryItemsEditor({
     <div className="space-y-3">
       {enableSearch && (
         <div className="space-y-2">
-          <div className="flex items-end gap-2">
-            <div className="flex-1 space-y-1">
-              <label className="text-xs font-medium opacity-80">
-                Dodaj pozycję z katalogu materiałów
-              </label>
-              <input
-                type="text"
-                placeholder="Szukaj materiału po nazwie..."
-                className="w-full rounded border border-border bg-background px-3 py-2 text-sm"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-            </div>
-            <button
-              type="button"
-              onClick={searchMaterials}
-              disabled={loading}
-              className="h-[38px] px-3 rounded border border-border bg-card text-xs hover:bg-card/80 disabled:opacity-60"
-            >
-              {loading ? "Szukam..." : "Szukaj"}
-            </button>
+          <div className="space-y-1">
+            <label className="text-xs font-medium opacity-80">
+              Dodaj pozycję z katalogu materiałów
+            </label>
+            <input
+              type="text"
+              placeholder="Szukaj materiału po nazwie..."
+              className="w-full rounded border border-border bg-background px-3 py-2 text-sm"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </div>
+
+          <div className="text-[11px] opacity-60 h-4">
+            {loading && <span>Szukam w katalogu…</span>}
+            {!loading && query.trim() && results.length === 0 && !errorMsg && (
+              <span>Brak wyników dla „{query.trim()}”.</span>
+            )}
+            {errorMsg && <span className="text-red-400">{errorMsg}</span>}
           </div>
 
           {results.length > 0 && (
@@ -159,7 +174,7 @@ export default function DeliveryItemsEditor({
                   onClick={() => addItemFromMaterial(m)}
                   className="w-full text-left px-2 py-1 rounded hover:bg-card/80 flex justify-between gap-2"
                 >
-                  <span>{m.title}</span>
+                  <span className="line-clamp-1">{m.title}</span>
                   {m.unit && (
                     <span className="opacity-60 font-mono text-[10px]">
                       {m.unit}
@@ -191,8 +206,8 @@ export default function DeliveryItemsEditor({
 
         {items.length === 0 && (
           <div className="text-xs opacity-60">
-            Brak pozycji. Wyszukaj materiał powyżej i dodaj go do dostawy, albo
-            pozwól AI uzupełnić listę w przyszłości.
+            Brak pozycji. Zacznij wpisywać nazwę materiału powyżej, żeby dodać go
+            do dostawy.
           </div>
         )}
 
@@ -225,11 +240,9 @@ export default function DeliveryItemsEditor({
                         inputMode="decimal"
                         className="w-full rounded border border-border bg-background px-2 py-1"
                         value={
-                          Number.isFinite(it.qty) ? String(it.qty) : ""
+                          Number.isFinite(it.qty as number) ? String(it.qty) : ""
                         }
-                        onChange={(e) =>
-                          updateItemQty(idx, e.target.value)
-                        }
+                        onChange={(e) => updateItemQty(idx, e.target.value)}
                       />
                     </div>
 
@@ -240,13 +253,11 @@ export default function DeliveryItemsEditor({
                         inputMode="decimal"
                         className="w-full rounded border border-border bg-background px-2 py-1"
                         value={
-                          Number.isFinite(it.unit_price)
+                          Number.isFinite(it.unit_price as number)
                             ? String(it.unit_price)
                             : ""
                         }
-                        onChange={(e) =>
-                          updateItemPrice(idx, e.target.value)
-                        }
+                        onChange={(e) => updateItemPrice(idx, e.target.value)}
                       />
                     </div>
 
@@ -274,5 +285,18 @@ export default function DeliveryItemsEditor({
         </div>
       )}
     </div>
+  );
+}
+
+export default function DeliveryItemsEditor(props: Props) {
+  // Dostęp do edycji pozycji dostawy tylko jeśli user może tworzyć/edytować niezatwierdzone dostawy.
+  // (storeman/manager/owner będą mieli permy, reszta nie → komponent znika)
+  return (
+    <RoleGuard
+      allow={[PERM.DELIVERIES_CREATE, PERM.DELIVERIES_UPDATE_UNAPPROVED]}
+      silent
+    >
+      <DeliveryItemsEditorInner {...props} />
+    </RoleGuard>
   );
 }

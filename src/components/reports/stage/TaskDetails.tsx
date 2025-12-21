@@ -2,6 +2,8 @@
 "use client";
 
 import Link from "next/link";
+import { PERM, can, canAny } from "@/lib/permissions";
+import { usePermissionSnapshot } from "@/lib/RoleContext";
 
 type TaskStatus = "todo" | "in_progress" | "done";
 
@@ -34,6 +36,12 @@ function statusLabel(status: TaskStatus): string {
 }
 
 export default function TaskDetails({ task, attachments }: TaskDetailsProps) {
+  const snapshot = usePermissionSnapshot();
+
+  const canReadTasks = canAny(snapshot, [PERM.TASKS_READ_ALL, PERM.TASKS_READ_OWN]);
+  const canSeePlaceLink = canReadTasks; // minimalnie: jak widzi taski, to może dostać link do miejsca
+  const canSeeAttachments = canReadTasks; // minimalnie: załączniki tylko dla tych co mogą czytać taski
+
   return (
     <section className="space-y-4">
       <header className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
@@ -61,19 +69,24 @@ export default function TaskDetails({ task, attachments }: TaskDetailsProps) {
             {task.place && (
               <>
                 <span className="opacity-60">•</span>
-                <Link
-                  href={`/object/${task.place.id}`}
-                  className="underline-offset-2 hover:underline"
-                >
-                  {task.place.name || "Miejsce na obiekcie"}
-                </Link>
+
+                {canSeePlaceLink ? (
+                  <Link
+                    href={`/object/${task.place.id}`}
+                    className="underline-offset-2 hover:underline"
+                  >
+                    {task.place.name || "Miejsce na obiekcie"}
+                  </Link>
+                ) : (
+                  <span>{task.place.name || "Miejsce na obiekcie"}</span>
+                )}
               </>
             )}
           </div>
         </div>
       </header>
 
-      {attachments.length > 0 && (
+      {canSeeAttachments && attachments.length > 0 && (
         <div className="border border-border/70 rounded-xl p-3 bg-card/40">
           <h2 className="text-sm font-semibold mb-2">Załączniki referencyjne</h2>
           <ul className="space-y-1 text-sm">

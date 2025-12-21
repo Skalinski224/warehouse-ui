@@ -5,6 +5,7 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 
 import RoleGuard from "@/components/RoleGuard";
+import { PERM } from "@/lib/permissions";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
 
 import type { VCrewsOverview } from "./CrewsTable";
@@ -103,15 +104,12 @@ export function AssignMemberDialog({
 
   // Filtrowanie: domyślnie pokaż tylko nie-disabled
   const selectableMembers = React.useMemo(
-    () =>
-      members.filter(
-        (m) => (m.status ?? "").toLowerCase() !== "disabled"
-      ),
+    () => members.filter((m) => (m.status ?? "").toLowerCase() !== "disabled"),
     [members]
   );
 
   return (
-    <RoleGuard allow={["owner", "manager"]} silent>
+    <RoleGuard allow={PERM.CREWS_MANAGE} silent>
       <>
         <button
           type="button"
@@ -161,9 +159,8 @@ export function AssignMemberDialog({
                     </option>
                     {selectableMembers.map((m) => {
                       const fullName =
-                        [m.first_name, m.last_name]
-                          .filter(Boolean)
-                          .join(" ") || m.email;
+                        [m.first_name, m.last_name].filter(Boolean).join(" ") ||
+                        m.email;
 
                       const crewLabel = m.crew_name
                         ? ` • obecnie: ${m.crew_name}`

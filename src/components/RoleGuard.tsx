@@ -1,60 +1,70 @@
+// src/components/RoleGuard.tsx
 "use client";
 
 import type { ReactNode } from "react";
-import { useAccountRole } from "@/lib/RoleContext";
+import { useMemo } from "react";
+import { usePermissionSnapshot } from "@/lib/RoleContext";
+import { can, type PermissionKey, type PermissionSnapshot } from "@/lib/permissions";
 
-/**
- * Role w systemie zgodnie z kanonem:
- * - owner
- * - manager
- * - storeman
- * - worker
- */
-export type GuardRole = "owner" | "manager" | "storeman" | "worker";
-
-type Props = {
-  allow: GuardRole[];             // np. ["manager", "storeman"]
+type GuardProps = {
+  allow: PermissionKey | PermissionKey[];
   children: ReactNode;
-  fallback?: ReactNode | null;    // co pokazać jeśli brak dostępu
-  silent?: boolean;               // jeśli true → ukrywa bez komunikatu
-  strict?: boolean;               // jeśli true → nie przepuszcza OWNERA
+  fallback?: ReactNode | null;
+  silent?: boolean;
 };
 
+function normalizeKeys(allow: PermissionKey | PermissionKey[]) {
+  return Array.isArray(allow) ? allow : [allow];
+}
+
 /**
- * RoleGuard — kontrola dostępu w UI.
- *
- * Zasady:
- * 1) OWNER → zawsze przepuszcza, jeśli strict=false (domyślnie)
- * 2) Jeśli strict=true → OWNER traktowany jak każda inna rola
- * 3) Jeśli rola nie znajduje się w allow[] → fallback lub null
- * 4) W stanie "brak informacji o roli" → fallback/null
+ * Hook: czy user ma dany permission?
+ * - Jeśli snapshot brak: false (bezpieczeństwo > UX).
+ */
+export function useCan(perm: PermissionKey): boolean {
+  const snapshot = usePermissionSnapshot();
+  return snapshot ? can(snapshot, perm) : false;
+}
+
+/**
+ * Hook: czy user ma którykolwiek z permissionów?
+ */
+export function useAnyCan(perms: PermissionKey | PermissionKey[]): boolean {
+  const snapshot = usePermissionSnapshot();
+  const keys = useMemo(() => normalizeKeys(perms), [perms]);
+
+  if (!snapshot) return false;
+  return keys.some((k) => can(snapshot, k));
+}
+
+/**
+ * Komponent: renderuje children jeśli user ma przynajmniej jeden permission z `allow`.
+ */
+export function Can({
+  allow,
+  children,
+  fallback = null,
+  silent = false,
+}: GuardProps) {
+  const allowed = useAnyCan(allow);
+
+  if (!allowed) return silent ? null : <>{fallback}</>;
+  return <>{children}</>;
+}
+
+/**
+ * Backward-compatible default export:
+ * w kodzie nadal możesz używać <RoleGuard allow=... />
  */
 export default function RoleGuard({
   allow,
   children,
   fallback = null,
   silent = false,
-  strict = false,
-}: Props) {
-  const role = useAccountRole();
-
-  // 1) Jeszcze nie wiemy jaka jest rola → nic nie pokazujemy
-  if (!role) {
-    return silent ? null : fallback;
-  }
-
-  // 2) OWNER = pełny dostęp, chyba że strict=true
-  if (role === "owner" && !strict) {
-    return <>{children}</>;
-  }
-
-  // 3) Normalne sprawdzenie ról
-  const allowed = allow.includes(role);
-
-  if (!allowed) {
-    if (silent) return null;
-    return <>{fallback}</>;
-  }
-
-  return <>{children}</>;
+}: GuardProps) {
+  return (
+    <Can allow={allow} fallback={fallback} silent={silent}>
+      {children}
+    </Can>
+  );
 }

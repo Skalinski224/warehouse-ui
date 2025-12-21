@@ -2,6 +2,8 @@
 "use client";
 
 import React from "react";
+import { useCan } from "@/components/RoleGuard";
+import { PERM } from "@/lib/permissions";
 
 export type CrewOption = {
   id: string;
@@ -25,6 +27,10 @@ export default function ChangeCrewDialog({
   onSelect,
   isSubmitting = false,
 }: Props) {
+  // ✅ foreman/manager/owner
+  const canChangeCrew = useCan(PERM.TEAM_MANAGE_CREWS);
+  if (!canChangeCrew) return null;
+
   const [selectedId, setSelectedId] = React.useState<string | null>(currentCrewId);
 
   React.useEffect(() => {
@@ -42,9 +48,7 @@ export default function ChangeCrewDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
       <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-5 shadow-xl">
-        <h2 className="text-sm font-semibold text-foreground">
-          Zmień brygadę
-        </h2>
+        <h2 className="text-sm font-semibold text-foreground">Zmień brygadę</h2>
         <p className="mt-1 text-xs text-muted-foreground">
           Wybierz brygadę, do której ma należeć ten członek zespołu.
         </p>
@@ -54,11 +58,12 @@ export default function ChangeCrewDialog({
             <button
               type="button"
               onClick={() => setSelectedId(null)}
+              disabled={isSubmitting}
               className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left ${
                 selectedId === null
                   ? "bg-primary/10 text-primary border border-primary/40"
                   : "hover:bg-muted/60 border border-transparent text-foreground"
-              }`}
+              } disabled:opacity-60`}
             >
               <span>Brak brygady</span>
               {selectedId === null && (
@@ -73,11 +78,12 @@ export default function ChangeCrewDialog({
                 key={crew.id}
                 type="button"
                 onClick={() => setSelectedId(crew.id)}
+                disabled={isSubmitting}
                 className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left ${
                   selectedId === crew.id
                     ? "bg-primary/10 text-primary border border-primary/40"
                     : "hover:bg-muted/60 border border-transparent text-foreground"
-                }`}
+                } disabled:opacity-60`}
               >
                 <span>{crew.name}</span>
                 {selectedId === crew.id && (

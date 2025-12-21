@@ -2,17 +2,21 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import { useCan } from "@/components/RoleGuard";
+import { PERM } from "@/lib/permissions";
+
+type AccountRole = "owner" | "manager" | "foreman" | "storeman" | "worker";
 
 type Props = {
   open: boolean;
   onClose: () => void;
-  currentRole: "owner" | "manager" | "storeman" | "worker";
-  onSelect: (role: "owner" | "manager" | "storeman" | "worker") => Promise<void>;
+  currentRole: AccountRole;
+  onSelect: (role: AccountRole) => Promise<void>;
   isSubmitting?: boolean;
 };
 
 const ROLES: {
-  value: "owner" | "manager" | "storeman" | "worker";
+  value: AccountRole;
   label: string;
   warning?: string;
 }[] = [
@@ -20,9 +24,13 @@ const ROLES: {
     value: "owner",
     label: "Właściciel",
     warning:
-      "Uwaga: rola właściciela daje pełną kontrolę nad kontem (w tym usuwanie innych właścicieli).",
+      "Uwaga: rola właściciela daje pełną kontrolę nad kontem (w tym zarządzanie innymi właścicielami).",
   },
   { value: "manager", label: "Manager" },
+  {
+    value: "foreman",
+    label: "Brygadzista",
+  },
   { value: "storeman", label: "Magazynier" },
   { value: "worker", label: "Pracownik" },
 ];
@@ -34,8 +42,12 @@ export default function ChangeRoleDialog({
   onSelect,
   isSubmitting = false,
 }: Props) {
+  // ✅ tylko owner / manager
+  const canManageRoles = useCan(PERM.TEAM_MANAGE_ROLES);
+  if (!canManageRoles) return null;
+
   const [selectedRole, setSelectedRole] =
-    useState<"owner" | "manager" | "storeman" | "worker">(currentRole);
+    useState<AccountRole>(currentRole);
 
   useEffect(() => {
     setSelectedRole(currentRole);
@@ -54,7 +66,9 @@ export default function ChangeRoleDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
       <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-5 shadow-xl">
-        <h2 className="text-sm font-semibold text-foreground">Zmień rolę</h2>
+        <h2 className="text-sm font-semibold text-foreground">
+          Zmień rolę
+        </h2>
         <p className="mt-1 text-xs text-muted-foreground">
           Wybierz nową rolę dla tego członka zespołu.
         </p>
@@ -72,11 +86,12 @@ export default function ChangeRoleDialog({
                 key={role.value}
                 type="button"
                 onClick={() => setSelectedRole(role.value)}
+                disabled={isSubmitting}
                 className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left ${
                   selectedRole === role.value
                     ? "bg-primary/10 text-primary border border-primary/40"
                     : "hover:bg-muted/60 border border-transparent text-foreground"
-                }`}
+                } disabled:opacity-60`}
               >
                 <span>{role.label}</span>
                 {selectedRole === role.value && (

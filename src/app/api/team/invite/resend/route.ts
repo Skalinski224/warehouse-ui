@@ -1,42 +1,95 @@
 // src/app/api/team/invite/resend/route.ts
 import { NextResponse } from "next/server";
-import { Resend } from "resend";
+import { z } from "zod";
+import { supabaseServer } from "@/lib/supabaseServer";
+import { buildInviteUrl, sendInviteEmail } from "@/lib/email";
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+const BodySchema = z.object({
+  email: z.string().email(),
+  token: z.string().min(10),
+});
 
 export async function POST(req: Request) {
   try {
-    const { email, token } = await req.json();
+    const json = await req.json().catch(() => null);
+    const parsed = BodySchema.safeParse(json);
 
-    if (!email || !token) {
+    if (!parsed.success) {
       return NextResponse.json(
-        { error: "Brak email lub token" },
+        { error: "invalid_body", details: parsed.error.flatten() },
         { status: 400 }
       );
     }
 
-    if (!process.env.NEXT_PUBLIC_APP_URL) {
-      console.error("NEXT_PUBLIC_APP_URL nie jest ustawione");
+    const { email, token } = parsed.data;
+
+    const supabase = await supabaseServer();
+
+    // 1) musi być zalogowany user
+    const { data: auth, error: authErr } = await supabase.auth.getUser();
+    if (authErr || !auth?.user) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
+
+    // 2) Walidacja, że to zaproszenie istnieje i pasuje do email+token
+    //    (i nie jest aktywnym członkiem)
+    const { data: member, error: memberErr } = await supabase
+      .from("team_members")
+      .select("id, email, status, invite_token, invite_expires_at")
+      .eq("email", email.toLowerCase())
+      .eq("invite_token", token)
+      .maybeSingle();
+
+    if (memberErr) {
+      console.error("[invite-resend] team_members read error:", memberErr);
+      return NextResponse.json({ error: "db_error" }, { status: 500 });
+    }
+
+    if (!member) {
       return NextResponse.json(
-        { error: "Brak konfiguracji adresu aplikacji" },
-        { status: 500 }
+        { error: "not_found", message: "Nie znaleziono zaproszenia." },
+        { status: 404 }
       );
     }
 
-    const inviteUrl = `${process.env.NEXT_PUBLIC_APP_URL}/invite/${token}`;
+    // Jeśli już aktywny — nie wysyłamy ponownie
+    if (member.status === "active") {
+      return NextResponse.json(
+        { error: "already_active", message: "Użytkownik jest już aktywny." },
+        { status: 400 }
+      );
+    }
 
-    await resend.emails.send({
-      from: "Magazyn App <noreply@yourdomain.com>",
+    // Jeżeli masz expirację tokenów — blokuj, żeby nie wysyłać martwego linka
+    if (member.invite_expires_at) {
+      const exp = new Date(member.invite_expires_at).getTime();
+      if (!Number.isNaN(exp) && exp < Date.now()) {
+        return NextResponse.json(
+          {
+            error: "token_expired",
+            message:
+              "Zaproszenie wygasło. Wygeneruj nowe zaproszenie (nowy token).",
+          },
+          { status: 400 }
+        );
+      }
+    }
+
+    // 3) Wysyłka maila – wspólna funkcja jak w /invite
+    const inviteUrl = buildInviteUrl(token);
+
+    const emailResult = await sendInviteEmail({
       to: email,
-      subject: "Zaproszenie do Magazyn App",
-      html: `
-        <p>Cześć!</p>
-        <p>Zostało wygenerowane dla Ciebie zaproszenie do konta w Magazyn App.</p>
-        <p>Kliknij w link poniżej, aby dokończyć rejestrację:</p>
-        <p><a href="${inviteUrl}">${inviteUrl}</a></p>
-        <p>Jeśli nie oczekiwałeś/aś tej wiadomości, możesz ją zignorować.</p>
-      `,
+      inviteUrl,
     });
+
+    if (!emailResult.ok) {
+      console.error("[invite-resend] Email sending failed:", emailResult.error);
+      return NextResponse.json(
+        { ok: false, error: emailResult.error ?? "email_failed" },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json({ ok: true });
   } catch (err) {

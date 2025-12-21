@@ -2,11 +2,21 @@
 
 import { useState, useRef, useEffect } from "react";
 import { signOut } from "@/app/actions/signout";
-import type { MaybeRole } from "@/lib/RoleContext";
+import { usePermissionSnapshot } from "@/lib/RoleContext";
+import { PERM, can } from "@/lib/permissions";
 
-export default function UserMenu(props: { name: string; role: MaybeRole }) {
-  const { name, role } = props;
+function cx(...c: Array<string | false | null | undefined>) {
+  return c.filter(Boolean).join(" ");
+}
 
+type Props = {
+  fullName: string; // Imię Nazwisko
+  roleLabel: string; // manager/owner/storeman/worker/...
+  crewName?: string | null; // nazwa brygady (opcjonalnie)
+};
+
+export default function UserMenu({ fullName, roleLabel, crewName }: Props) {
+  const snapshot = usePermissionSnapshot();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -21,37 +31,67 @@ export default function UserMenu(props: { name: string; role: MaybeRole }) {
   return (
     <div ref={ref} className="relative">
       <button
-        onClick={() => setOpen((o) => !o)}
-        className="flex items-center gap-3 rounded-xl border border-border bg-card/70 px-3 py-2 hover:bg-card shadow-sm"
+        onClick={() => setOpen((v) => !v)}
+        className={cx(
+          "inline-flex items-center gap-2 rounded-2xl border border-border px-3 py-2",
+          "bg-background/10 hover:bg-background/20 transition",
+          "focus:outline-none focus:ring-2 focus:ring-ring/40"
+        )}
+        aria-expanded={open}
       >
-        <div className="size-8 rounded-full bg-background grid place-items-center text-xs border border-border">
-          N
+        <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500/80" />
+        <div className="flex flex-col items-start leading-tight">
+          <span className="text-sm font-semibold text-foreground">{fullName}</span>
+          <span className="text-[11px] text-muted-foreground">
+            {roleLabel}
+            {crewName ? ` • ${crewName}` : ""}
+          </span>
         </div>
-
-        <div className="text-left leading-tight">
-          <div className="text-sm font-medium">{name}</div>
-          <div className="text-xs text-foreground/70">
-            {role ?? "brak roli"}
-          </div>
-        </div>
+        <span className="ml-2 text-xs text-muted-foreground">{open ? "▲" : "▼"}</span>
       </button>
 
       {open && (
-        <div className="absolute right-0 mt-2 w-56 rounded-xl border border-border bg-card shadow-lg overflow-hidden">
-          <button
-            className="w-full text-left px-3 py-2 text-sm hover:bg-background/40"
-            onClick={() => {
-              setOpen(false);
-              window.location.href = "/settings";
-            }}
-          >
-            Ustawienia globalne
-          </button>
+        <div
+          className={cx(
+            "absolute right-0 mt-2 w-64 rounded-2xl border border-border bg-card/90 p-2",
+            "shadow-lg backdrop-blur"
+          )}
+        >
+          <div className="px-2 py-2">
+            <div className="text-xs font-semibold text-foreground">{fullName}</div>
+            <div className="mt-0.5 text-[11px] text-muted-foreground">
+              rola: <span className="text-foreground/90">{roleLabel}</span>
+              {crewName ? (
+                <>
+                  {" "}
+                  • brygada: <span className="text-foreground/90">{crewName}</span>
+                </>
+              ) : null}
+            </div>
+          </div>
 
-          <div className="h-px bg-border/60" />
+          <div className="my-2 h-px bg-border/70" />
+
+          {snapshot && can(snapshot, PERM.PROJECT_SETTINGS_MANAGE) && (
+            <button
+              className={cx(
+                "w-full rounded-xl px-3 py-2 text-left text-sm transition border",
+                "border-transparent hover:border-border/60 hover:bg-background/20"
+              )}
+              onClick={() => (window.location.href = "/settings")}
+            >
+              Ustawienia
+            </button>
+          )}
 
           <form action={signOut}>
-            <button className="w-full text-left px-3 py-2 text-sm hover:bg-background/40 text-red-400">
+            <button
+              className={cx(
+                "mt-1 w-full rounded-xl px-3 py-2 text-left text-sm transition border",
+                "border-transparent hover:border-border/60 hover:bg-background/20",
+                "text-red-400"
+              )}
+            >
               Wyloguj
             </button>
           </form>

@@ -1,5 +1,7 @@
-// src/app/(app)/deliveries/_components/DeliverySummaryDraft.tsx
 "use client";
+
+import RoleGuard from "@/components/RoleGuard";
+import { PERM } from "@/lib/permissions";
 
 type DeliveryItemDraft = {
   material_id: string;
@@ -28,7 +30,7 @@ type Props = {
   confirmDisabled?: boolean;
 };
 
-export default function DeliverySummaryDraft({
+function DeliverySummaryDraftInner({
   draft,
   onConfirm,
   confirmLabel = "Dodaj dostawę jako oczekującą",
@@ -156,12 +158,10 @@ export default function DeliverySummaryDraft({
                     <div className="flex-1 min-w-0">
                       <div className="truncate">{it.title}</div>
                       <div className="text-[10px] opacity-70">
-                        Ilość: {it.qty} × {it.unit_price.toLocaleString(
-                          "pl-PL",
-                          {
-                            maximumFractionDigits: 2,
-                          }
-                        )}
+                        Ilość: {it.qty} ×{" "}
+                        {it.unit_price.toLocaleString("pl-PL", {
+                          maximumFractionDigits: 2,
+                        })}
                       </div>
                     </div>
                     <div className="text-[11px] font-medium whitespace-nowrap">
@@ -193,5 +193,13 @@ export default function DeliverySummaryDraft({
         )}
       </div>
     </section>
+  );
+}
+
+export default function DeliverySummaryDraft(props: Props) {
+  return (
+    <RoleGuard allow={PERM.DELIVERIES_CREATE} silent>
+      <DeliverySummaryDraftInner {...props} />
+    </RoleGuard>
   );
 }

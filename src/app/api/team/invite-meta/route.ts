@@ -1,7 +1,7 @@
 // src/app/api/team/invite-meta/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { supabaseServer } from "@/lib/supabaseServer";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
 const BodySchema = z.object({
   token: z.string().min(10),
@@ -21,12 +21,12 @@ export async function POST(req: Request) {
 
     const { token } = parsed.data;
 
-    // 👇 TU BYŁ PROBLEM
-    const supabase = await supabaseServer();
+    // ✅ dla publicznego flow zaproszeń używamy service role (RLS nie blokuje)
+    const supabase = supabaseAdmin();
 
     const { data: member, error } = await supabase
       .from("team_members")
-      .select("id, email, account_id, role, status, invite_expires_at")
+      .select("id, email, role, status, invite_expires_at")
       .eq("invite_token", token)
       .eq("status", "invited")
       .is("deleted_at", null)
@@ -60,12 +60,12 @@ export async function POST(req: Request) {
       );
     }
 
+    // 🔒 nie ujawniamy account_id publicznie (nie jest potrzebne do UI)
     return NextResponse.json(
       {
         ok: true,
         member_id: member.id,
         email: member.email,
-        account_id: member.account_id,
         role: member.role,
       },
       { status: 200 }

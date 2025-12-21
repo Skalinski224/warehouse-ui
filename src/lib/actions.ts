@@ -3,13 +3,13 @@
 
 import { revalidatePath } from "next/cache";
 import { supabaseServer } from "@/lib/supabaseServer";
+import { PERM } from "@/lib/permissions";
 
 /* -------------------------------------------------------------------------- */
 /*                            POMOCNICZE / UTILS                              */
 /* -------------------------------------------------------------------------- */
 
 async function db() {
-  // zawsze używamy klienta server-side (SERVICE_ROLE)
   return await supabaseServer();
 }
 
@@ -17,25 +17,113 @@ function refresh(paths: string[]) {
   for (const p of paths) revalidatePath(p);
 }
 
+/**
+ * Supabase/PostgREST potrafi zwracać brak RPC jako:
+ * - Postgres: 42883 "function does not exist"
+ * - PostgREST: PGRST202 "Could not find the function ... in the schema cache"
+ * - albo message containing "schema cache" / "does not exist"
+ */
 function isNoSuchFunction(err: any) {
+  const code = String(err?.code || "");
   const msg = String(err?.message || "");
   return (
-    err?.code === "42883" ||
+    code === "42883" ||
+    code === "PGRST202" ||
+    /schema cache/i.test(msg) ||
+    /could not find the function/i.test(msg) ||
     /function .* does not exist/i.test(msg) ||
     /42883/.test(msg)
   );
+}
+
+/**
+ * Permission gate – jedyne źródło prawdy.
+ * Obsługuje snapshot w 2 formatach:
+ * A) { permissions: string[] } lub [ { permissions: string[] } ]
+ * B) [ { key: string, allowed: boolean } ]
+ */
+async function requirePermission(perm: string) {
+  const supabase = await supabaseServer();
+
+  const { data, error } = await supabase.rpc("my_permissions_snapshot");
+  if (error) {
+    console.error("my_permissions_snapshot error:", {
+      code: (error as any).code,
+      message: error.message,
+      details: (error as any).details,
+      hint: (error as any).hint,
+    });
+    throw new Error("Brak uprawnień.");
+  }
+  if (!data) throw new Error("Brak uprawnień.");
+
+  // Format A
+  const obj = Array.isArray(data) ? (data[0] ?? null) : data;
+  const permsA =
+    obj && typeof obj === "object" ? (obj as any).permissions : null;
+
+  if (Array.isArray(permsA)) {
+    if (!permsA.includes(perm)) {
+      console.error("requirePermission denied (format A)", {
+        perm,
+        perms: permsA,
+      });
+      throw new Error("Brak uprawnień.");
+    }
+    return supabase;
+  }
+
+  // Format B
+  if (Array.isArray(data)) {
+    const allowed = new Set(
+      (data as any[])
+        .filter((r) => r?.allowed)
+        .map((r) => String(r.key))
+        .filter(Boolean)
+    );
+
+    if (!allowed.has(perm)) {
+      console.error("requirePermission denied (format B)", {
+        perm,
+        allowed: [...allowed],
+      });
+      throw new Error("Brak uprawnień.");
+    }
+    return supabase;
+  }
+
+  console.error("requirePermission: unknown snapshot shape", data);
+  throw new Error("Brak uprawnień.");
+}
+
+async function getCurrentAccountIdOrThrow(
+  supabase: Awaited<ReturnType<typeof db>>
+) {
+  const { data: accountId, error } = await supabase.rpc("current_account_id");
+
+  if (error) {
+    console.error("current_account_id RPC error:", {
+      code: (error as any).code,
+      message: error.message,
+      details: (error as any).details,
+      hint: (error as any).hint,
+    });
+  }
+
+  if (!accountId) throw new Error("Brak wybranego konta (current_account_id).");
+  return String(accountId);
+}
+
+function getMaterialsImagePermission(): string {
+  // Jeśli masz osobny perm na obrazki – użyj go.
+  // Jak nie masz – fallback na MATERIALS_WRITE (żeby plik działał bez zmian w permissions.ts)
+  return (PERM as any).MATERIALS_UPDATE_IMAGE ?? PERM.MATERIALS_WRITE;
 }
 
 /* -------------------------------------------------------------------------- */
 /*                                MATERIAŁY                                   */
 /* -------------------------------------------------------------------------- */
 
-/**
- * Tworzy materiał:
- * 1) woła RPC create_material(...)
- * 2) (opcjonalnie) uploaduje obraz do storage i uzupełnia image_url
- * Zwraca id materiału.
- */
 export async function createMaterial(formData: FormData) {
   const supabase = await db();
 
@@ -47,18 +135,18 @@ export async function createMaterial(formData: FormData) {
   const title = String(formData.get("title") || "").trim();
   const unit = String(formData.get("unit") || "szt").trim();
   const baseQty = Number(formData.get("base_quantity") || 0);
+
   const currentQty =
     formData.get("current_quantity") === null ||
     formData.get("current_quantity") === ""
       ? baseQty
       : Number(formData.get("current_quantity"));
+
   const description = String(formData.get("description") || "").trim();
   const ctaUrl = String(formData.get("cta_url") || "").trim() || null;
-  const file = (formData.get("image") as File | null) ?? null;
 
   if (!title || !unit) throw new Error("Brak wymaganych pól (title, unit).");
 
-  // --- 1) RPC create_material ---
   const { data: rpcData, error: e1 } = await supabase.rpc("create_material", {
     p_title: title,
     p_description: description || "",
@@ -85,46 +173,41 @@ export async function createMaterial(formData: FormData) {
       );
     }
 
-    throw new Error(
-      `create_material RPC error: ${norm.message || "nieznany błąd"}`
-    );
+    throw new Error(`create_material RPC error: ${norm.message || "błąd"}`);
   }
 
   const materialId: string =
     typeof rpcData === "string" ? rpcData : (rpcData as any)?.id;
+
   if (!materialId) throw new Error("create_material nie zwrócił ID.");
 
-  // --- 2) Upload miniatury do storage (opcjonalny) ---
+  // Jeśli chcesz upload zdjęcia już przy tworzeniu:
+  const file = (formData.get("image") as File | null) ?? null;
   if (file && file.size > 0) {
-    const { data: userData } = await supabase.auth.getUser();
-    const accountId =
-      (userData?.user?.app_metadata as any)?.account_id ||
-      (userData?.user?.user_metadata as any)?.account_id;
+    // tu możesz wymagać osobnego perm, ale create i tak zwykle mają tylko storeman/manager/owner
+    const accountId = await getCurrentAccountIdOrThrow(supabase);
 
-    if (!accountId) {
-      console.warn("createMaterial: brak account_id w JWT – pomijam upload");
-    } else {
-      const ext =
-        (file.type && file.type.split("/")[1]) ||
-        (file.name.includes(".") ? file.name.split(".").pop() : "jpg");
-      const path = `${accountId}/materials/${materialId}.${ext}`;
+    // STAŁA ŚCIEŻKA -> zero śmieci
+    const path = `${accountId}/materials/${materialId}.jpg`;
 
-      const { error: upErr } = await supabase.storage
+    const { error: upErr } = await supabase.storage
+      .from("material-images")
+      .upload(path, file, {
+        upsert: true,
+        contentType: file.type || "image/jpeg",
+      });
+
+    if (!upErr) {
+      const { data: pub } = await supabase.storage
         .from("material-images")
-        .upload(path, file, {
-          upsert: true,
-          contentType: file.type || "image/jpeg",
-        });
+        .getPublicUrl(path);
 
-      if (upErr) {
-        console.warn("createMaterial: upload error", upErr.message);
-      } else {
-        const { data: pub } = await supabase.storage
-          .from("material-images")
-          .getPublicUrl(path);
-        const imageUrl = pub?.publicUrl ?? null;
+      const publicUrl = pub?.publicUrl ?? null;
 
-        // update_material RPC lub fallback UPDATE
+      if (publicUrl) {
+        // cache-bust w DB, żeby stare się nie wyświetlało
+        const imageUrl = `${publicUrl}?v=${Date.now()}`;
+
         const { error: updRpcErr } = await supabase.rpc("update_material", {
           p_id: materialId,
           p_patch: { image_url: imageUrl },
@@ -137,11 +220,13 @@ export async function createMaterial(formData: FormData) {
               .update({ image_url: imageUrl })
               .eq("id", materialId)
               .limit(1);
-            if (updErr)
+
+            if (updErr) {
               console.warn(
                 "createMaterial: fallback UPDATE image_url error",
                 updErr.message
               );
+            }
           } else {
             console.warn(
               "createMaterial: update_material RPC error",
@@ -150,6 +235,8 @@ export async function createMaterial(formData: FormData) {
           }
         }
       }
+    } else {
+      console.warn("createMaterial: upload error", upErr.message);
     }
   }
 
@@ -157,15 +244,14 @@ export async function createMaterial(formData: FormData) {
   return materialId;
 }
 
-/* -------------------------------------------------------------------------- */
-/*                               UPDATE MATERIAL                              */
-/* -------------------------------------------------------------------------- */
+export async function updateMaterial(id: string, patch: Record<string, any>) {
+  // Gate ogólny dla edycji materiału
+  const supabase = await requirePermission(PERM.MATERIALS_WRITE);
 
-export async function updateMaterial(
-  id: string,
-  patch: Record<string, any>
-) {
-  const supabase = await db();
+  // DODATKOWY gate tylko dla obrazka (owner/manager/storeman)
+  if (patch && Object.prototype.hasOwnProperty.call(patch, "image_url")) {
+    await requirePermission(getMaterialsImagePermission());
+  }
 
   const allowed = new Set([
     "title",
@@ -178,15 +264,12 @@ export async function updateMaterial(
   ]);
 
   const clean: Record<string, any> = {};
-  for (const [k, v] of Object.entries(patch)) {
+  for (const [k, v] of Object.entries(patch || {})) {
     if (!allowed.has(k)) continue;
 
     if (k === "base_quantity" || k === "current_quantity") {
       clean[k] = Number(v);
-    } else if (
-      v === "" &&
-      ["description", "cta_url", "image_url"].includes(k)
-    ) {
+    } else if (v === "" && ["description", "cta_url", "image_url"].includes(k)) {
       clean[k] = null;
     } else {
       clean[k] = v;
@@ -195,22 +278,81 @@ export async function updateMaterial(
 
   if (Object.keys(clean).length === 0) return;
 
-  const { error } = await supabase
-    .from("materials")
-    .update(clean)
-    .eq("id", id)
-    .limit(1);
+  // 1) RPC jeśli istnieje
+  const { error: rpcErr } = await supabase.rpc("update_material", {
+    p_id: id,
+    p_patch: clean,
+  } as any);
 
-  if (error) {
-    throw new Error(error.message);
+  if (rpcErr) {
+    // 2) brak RPC / schema cache → fallback na direct update
+    // UWAGA: to wymaga żeby audit trigger działał poprawnie (SECURITY DEFINER w fn_materials_audit)
+    if (isNoSuchFunction(rpcErr)) {
+      const { error } = await supabase
+        .from("materials")
+        .update(clean)
+        .eq("id", id)
+        .limit(1);
+
+      if (error) throw new Error(error.message);
+    } else {
+      throw new Error(rpcErr.message);
+    }
   }
 
   refresh(["/materials", `/materials/${id}`, "/low-stock"]);
 }
 
-/* -------------------------------------------------------------------------- */
-/*                               DELETE / RESTORE                             */
-/* -------------------------------------------------------------------------- */
+/**
+ * Podmiana zdjęcia materiału – tylko dla storeman/manager/owner (przez permissions).
+ * Nie śmieci w storage: zawsze nadpisujemy ten sam obiekt.
+ *
+ * FormData:
+ * - material_id: string
+ * - file: File
+ */
+export async function uploadMaterialImage(formData: FormData): Promise<void> {
+  // TWARDY gate dla obrazków
+  const supabase = await requirePermission(getMaterialsImagePermission());
+
+  const materialId = String(formData.get("material_id") ?? "").trim();
+  const file = (formData.get("file") as File | null) ?? null;
+
+  if (!materialId) throw new Error("Brak material_id.");
+  if (!file || file.size <= 0) throw new Error("Brak pliku.");
+
+  const accountId = await getCurrentAccountIdOrThrow(supabase);
+
+  // STAŁA ŚCIEŻKA => zero “starych plików”
+  const path = `${accountId}/materials/${materialId}.jpg`;
+
+  const { error: upErr } = await supabase.storage
+    .from("material-images")
+    .upload(path, file, {
+      upsert: true,
+      contentType: file.type || "image/jpeg",
+    });
+
+  if (upErr) {
+    console.error("uploadMaterialImage: storage upload error:", upErr);
+    throw new Error(upErr.message || "Nie udało się wgrać zdjęcia.");
+  }
+
+  const { data: pub } = await supabase.storage
+    .from("material-images")
+    .getPublicUrl(path);
+
+  const publicUrl = pub?.publicUrl ?? null;
+  if (!publicUrl) throw new Error("Nie udało się pobrać publicUrl.");
+
+  // Cache-bust -> UI nie pokaże starego
+  const imageUrl = `${publicUrl}?v=${Date.now()}`;
+
+  // Ustawiamy image_url przez updateMaterial (zachowa logikę RPC/fallback + revalidate)
+  await updateMaterial(materialId, { image_url: imageUrl });
+
+  refresh(["/materials", `/materials/${materialId}`, "/low-stock"]);
+}
 
 export async function softDeleteMaterial(id: string) {
   const supabase = await db();
@@ -226,6 +368,7 @@ export async function softDeleteMaterial(id: string) {
         .update({ deleted_at: new Date().toISOString() })
         .eq("id", id)
         .limit(1);
+
       if (error) throw new Error(error.message);
     } else {
       throw new Error(rpcErr.message);
@@ -249,6 +392,7 @@ export async function restoreMaterial(id: string) {
         .update({ deleted_at: null, deleted_by: null })
         .eq("id", id)
         .limit(1);
+
       if (error) throw new Error(error.message);
     } else {
       throw new Error(rpcErr.message);
@@ -259,32 +403,12 @@ export async function restoreMaterial(id: string) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*                          DOSTAWY – CREATE / DELETE                         */
+/*                 DOSTAWY – CREATE / DELETE / PAID / APPROVE                  */
 /* -------------------------------------------------------------------------- */
 
-/**
- * Tworzy nową dostawę "oczekującą" przez RPC create_delivery.
- *
- * FormData – oczekiwane pola:
- * - date           – string (np. "2025-11-19" albo "19.11.2025")
- * - place_label    – miejsce (tekst)
- * - person         – zgłaszający
- * - supplier       – dostawca (opcjonalnie)
- * - delivery_cost  – koszt dostawy (number)
- * - materials_cost – koszt materiałów (number)
- * - invoice        – File (opcjonalnie, input typu "file")
- * - items_json     – string JSON tablicy pozycji:
- *                    [{ material_id, qty, unit_price }, ...]
- */
 export async function createDelivery(formData: FormData): Promise<string> {
-  const supabase = await db();
+  const supabase = await requirePermission(PERM.DELIVERIES_CREATE);
 
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  if (!session) throw new Error("Brak sesji. Zaloguj się ponownie.");
-
-  // --- 1) odczyt pól prostych ---
   const rawDate = String(formData.get("date") ?? "").trim();
   const placeLabel = String(formData.get("place_label") ?? "").trim() || null;
   const person = String(formData.get("person") ?? "").trim() || null;
@@ -302,70 +426,38 @@ export async function createDelivery(formData: FormData): Promise<string> {
       ? null
       : Number(materialsCostRaw.replace(",", "."));
 
-  // parsowanie daty – akceptujemy "YYYY-MM-DD" oraz "DD.MM.YYYY"
   let isoDate = rawDate;
   if (/^\d{2}\.\d{2}\.\d{4}$/.test(rawDate)) {
     const [dd, mm, yyyy] = rawDate.split(".");
     isoDate = `${yyyy}-${mm}-${dd}`;
   }
 
-  // --- 2) parse items_json ---
   const itemsJson = String(formData.get("items_json") ?? "[]");
   let items: any[] = [];
   try {
     const parsed = JSON.parse(itemsJson);
-    if (Array.isArray(parsed)) {
-      items = parsed;
-    } else {
-      console.warn(
-        "createDelivery: items_json nie jest tablicą, pomijam",
-        parsed
-      );
-    }
-  } catch (e) {
-    console.warn("createDelivery: nie udało się sparsować items_json", e);
-  }
+    if (Array.isArray(parsed)) items = parsed;
+  } catch {}
 
-  // --- 3) upload faktury (opcjonalny) ---
+  const accountId = await getCurrentAccountIdOrThrow(supabase);
+
   const invoiceFile = (formData.get("invoice") as File | null) ?? null;
   let invoicePath: string | null = null;
 
   if (invoiceFile && invoiceFile.size > 0) {
-    const { data: userData } = await supabase.auth.getUser();
-    const accountId =
-      (userData?.user?.app_metadata as any)?.account_id ||
-      (userData?.user?.user_metadata as any)?.account_id;
+    const safeName = invoiceFile.name.replace(/\s+/g, "-");
+    const path = `${accountId}/invoices/${Date.now()}-${safeName}`;
 
-    if (!accountId) {
-      console.warn(
-        "createDelivery: brak account_id w JWT – pomijam upload faktury"
-      );
-    } else {
-      const ext =
-        (invoiceFile.type && invoiceFile.type.split("/")[1]) ||
-        (invoiceFile.name.includes(".")
-          ? invoiceFile.name.split(".").pop()
-          : "pdf");
+    const { error: upErr } = await supabase.storage
+      .from("invoices")
+      .upload(path, invoiceFile, {
+        upsert: true,
+        contentType: invoiceFile.type || "application/octet-stream",
+      });
 
-      const safeName = invoiceFile.name.replace(/\s+/g, "-");
-      const path = `${accountId}/invoices/${Date.now()}-${safeName}`;
-
-      const { error: upErr } = await supabase.storage
-        .from("invoices")
-        .upload(path, invoiceFile, {
-          upsert: true,
-          contentType: invoiceFile.type || "application/octet-stream",
-        });
-
-      if (upErr) {
-        console.warn("createDelivery: upload faktury error", upErr.message);
-      } else {
-        invoicePath = path;
-      }
-    }
+    if (!upErr) invoicePath = path;
   }
 
-  // --- 4) RPC create_delivery ---
   const { data, error } = await supabase.rpc("create_delivery", {
     p_date: isoDate,
     p_place_label: placeLabel,
@@ -377,22 +469,11 @@ export async function createDelivery(formData: FormData): Promise<string> {
     p_items: items,
   });
 
-  if (error) {
-    const norm = {
-      code: error.code,
-      message: error.message,
-      details: (error as any).details,
-      hint: (error as any).hint,
-    };
-    console.error("create_delivery RPC error:", norm);
-    throw new Error(norm.message || "Nie udało się utworzyć dostawy.");
-  }
+  if (error) throw new Error(error.message || "Nie udało się utworzyć dostawy.");
 
   const deliveryId: string =
     typeof data === "string" ? data : (data as any)?.id;
-  if (!deliveryId) {
-    console.warn("create_delivery: brak ID w odpowiedzi, data =", data);
-  }
+  if (!deliveryId) throw new Error("create_delivery: brak ID w odpowiedzi");
 
   refresh([
     "/deliveries",
@@ -403,90 +484,71 @@ export async function createDelivery(formData: FormData): Promise<string> {
     "/reports/plan-vs-reality",
   ]);
 
-  return deliveryId || "";
+  return deliveryId;
 }
 
-/**
- * Soft-delete dostawy (pod "historia usuniętych").
- */
 export async function softDeleteDelivery(id: string) {
-  const trimmed = id.trim();
-  if (!trimmed) {
-    console.error("softDeleteDelivery: pusty id");
-    return;
-  }
+  const trimmed = String(id || "").trim();
+  if (!trimmed) return;
 
-  const supabase = await db();
+  const supabase = await requirePermission(PERM.DELIVERIES_DELETE_UNAPPROVED);
+
   const { error } = await supabase.rpc("soft_delete_delivery", {
     p_delivery_id: trimmed,
   });
 
-  if (error) {
-    console.error("soft_delete_delivery RPC error:", error);
-    throw new Error(error.message);
-  }
+  if (error) throw new Error(error.message);
 
   refresh(["/reports/deliveries", "/deliveries"]);
 }
 
-/**
- * Przywraca wcześniej miękko usuniętą dostawę.
- */
 export async function restoreDelivery(id: string) {
-  const trimmed = id.trim();
-  if (!trimmed) {
-    console.error("restoreDelivery: pusty id");
-    return;
-  }
+  const trimmed = String(id || "").trim();
+  if (!trimmed) return;
 
-  const supabase = await db();
+  const supabase = await requirePermission(PERM.DELIVERIES_DELETE_UNAPPROVED);
+
   const { error } = await supabase.rpc("restore_delivery", {
     p_delivery_id: trimmed,
   });
 
-  if (error) {
-    console.error("restore_delivery RPC error:", error);
-    throw new Error(error.message);
-  }
+  if (error) throw new Error(error.message);
 
   refresh(["/reports/deliveries", "/deliveries"]);
 }
 
-/* -------------------------------------------------------------------------- */
-/*                          DOSTAWY / RAPORTY (RPC)                           */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Akceptuje dostawę:
- * 1) woła add_delivery_and_update_stock(p_delivery_id)
- * 2) odświeża widoki
- *
- * Używane jako server action z <form>, więc id bierzemy z FormData.
- */
-export async function approveDelivery(formData: FormData): Promise<void> {
+export async function markDeliveryPaid(formData: FormData): Promise<void> {
   const id = String(formData.get("delivery_id") ?? "").trim();
-  if (!id) {
-    console.error("approveDelivery: brak delivery_id");
-    return;
-  }
+  if (!id) return;
 
-  const supabase = await db();
+  const supabase = await requirePermission(PERM.DELIVERIES_UPDATE_UNAPPROVED);
 
-  const { error } = await supabase.rpc("add_delivery_and_update_stock", {
-    // NAZWA PARAMETRU MUSI BYĆ TAKA JAK W SQL:
+  const { error } = await supabase.rpc("mark_delivery_paid", {
     p_delivery_id: id,
   });
 
-  if (error) {
-    console.error("approveDelivery RPC error:", {
-      code: (error as any).code,
-      message: error.message,
-      details: (error as any).details,
-      hint: (error as any).hint,
-    });
-    // jak chcesz, możesz tu jeszcze rzucić Error, żeby UI pokazał błąd
-    // throw new Error("Nie udało się zaakceptować dostawy.");
-  }
+  if (error) throw new Error(error.message || "Nie udało się oznaczyć opłacenia.");
+
+  refresh([
+    "/reports/deliveries",
+    "/low-stock",
+    "/deliveries",
+    "/reports/project-metrics",
+    "/reports/plan-vs-reality",
+  ]);
+}
+
+export async function approveDelivery(formData: FormData): Promise<void> {
+  const id = String(formData.get("delivery_id") ?? "").trim();
+  if (!id) return;
+
+  const supabase = await requirePermission(PERM.DELIVERIES_APPROVE);
+
+  const { error } = await supabase.rpc("add_delivery_and_update_stock", {
+    p_delivery_id: id,
+  });
+
+  if (error) throw new Error(error.message || "Nie udało się zatwierdzić dostawy.");
 
   refresh([
     "/deliveries",
@@ -498,33 +560,29 @@ export async function approveDelivery(formData: FormData): Promise<void> {
   ]);
 }
 
-/**
- * Akceptuje dzienny raport zużycia:
- * 1) woła subtract_usage_and_update_stock(p_report_id)
- * 2) odświeża widoki
- */
 export async function approveDailyReport(formData: FormData): Promise<void> {
   const id = String(formData.get("report_id") ?? "").trim();
-  if (!id) {
-    console.error("approveDailyReport: brak report_id");
-    return;
-  }
+  if (!id) return;
 
   const supabase = await db();
 
+  // 1) zatwierdzenie + aktualizacja stanów
   const { error } = await supabase.rpc("subtract_usage_and_update_stock", {
-    // analogicznie: dopasuj do SQL, u Ciebie jest p_report_id
     p_report_id: id,
   });
 
-  if (error) {
-    console.error("approveDailyReport RPC error:", {
-      code: (error as any).code,
-      message: error.message,
-      details: (error as any).details,
-      hint: (error as any).hint,
-    });
-    // opcjonalnie: throw new Error("Nie udało się zaakceptować raportu dziennego.");
+  if (error) throw new Error(error.message || "Nie udało się zatwierdzić raportu.");
+
+  // 2) NOWE: jeśli raport ma task_id + is_completed=true -> ustaw task done (SECURITY DEFINER)
+  const { error: taskErr } = await supabase.rpc("complete_task_from_daily_report", {
+    p_report_id: id,
+  });
+
+  if (taskErr) {
+    // nie wywracaj całego approve jeśli nie ma RPC (dev) albo cache, ale loguj
+    if (!isNoSuchFunction(taskErr)) {
+      throw new Error(taskErr.message || "Nie udało się zaktualizować statusu zadania.");
+    }
   }
 
   refresh([
@@ -533,19 +591,15 @@ export async function approveDailyReport(formData: FormData): Promise<void> {
     "/materials",
     "/reports/project-metrics",
     "/reports/plan-vs-reality",
+    "/tasks",
+    "/object",
   ]);
 }
+
 
 /* -------------------------------------------------------------------------- */
 /*                 DZIENNE RAPORTY – CREATE Z ZADANIAMI (OBIEKT)              */
 /* -------------------------------------------------------------------------- */
-
-/**
- * DTO zgodne z naszym kanonem backendu:
- * - daily_reports.items: { material_id, qty_used, note }
- * - task_completions: wiążemy task + report + członka
- * - task_completion_attachments: URL-e zdjęć (upload robimy wyżej, np. w API)
- */
 
 export type DailyReportItemInput = {
   materialId: string;
@@ -557,56 +611,34 @@ export type CompletedTaskMetaInput = {
   taskId: string;
   note?: string | null;
   completedByMemberId?: string | null;
-  photoUrls?: string[]; // URL-e plików już wrzuconych do storage
+  photoUrls?: string[];
 };
 
 export interface CreateDailyReportWithTasksInput {
-  date: string; // 'YYYY-MM-DD'
+  date: string;
   crewId: string;
   stageId?: string | null;
   items: DailyReportItemInput[];
   completedTasks: CompletedTaskMetaInput[];
 }
 
-/**
- * Tworzy dzienny raport zużycia + spina go z zadaniami:
- * 1) INSERT do daily_reports (items -> JSONB)
- * 2) dla każdego completedTasks:
- *    - INSERT do task_completions
- *    - INSERT do task_completion_attachments (po URL-ach)
- *    - UPDATE project_tasks SET status = 'done'
- *
- * Uwaga: to NIE jest transakcja w jednej funkcji SQL – jeśli chcesz full-atomic,
- * przeniesiemy to w przyszłości do RPC. Na MVP świadomie akceptujemy ten poziom.
- */
 export async function createDailyReportWithTasks(
   input: CreateDailyReportWithTasksInput
 ): Promise<string> {
   const supabase = await db();
 
-  // 1. sanity-check
   const trimmedDate = String(input.date || "").trim();
-  if (!trimmedDate) {
-    throw new Error("Brak daty raportu (date).");
-  }
-  const crewId = String(input.crewId || "").trim();
-  if (!crewId) {
-    throw new Error("Brak crewId – raport musi być przypisany do brygady.");
-  }
+  if (!trimmedDate) throw new Error("Brak daty raportu (date).");
 
-  // 2. Auth user -> created_by w daily_reports
+  const crewId = String(input.crewId || "").trim();
+  if (!crewId) throw new Error("Brak crewId.");
+
   const {
     data: { user },
-    error: userError,
   } = await supabase.auth.getUser();
-
-  if (userError) {
-    console.warn("createDailyReportWithTasks: getUser error:", userError);
-  }
 
   const createdByUserId = user?.id ?? null;
 
-  // 3. Mapowanie items -> struktura JSONB daily_reports.items
   const itemsPayload =
     input.items?.map((it) => ({
       material_id: it.materialId,
@@ -614,7 +646,6 @@ export async function createDailyReportWithTasks(
       note: it.note ?? null,
     })) ?? [];
 
-  // 4. INSERT do daily_reports
   const { data: reportRow, error: reportErr } = await supabase
     .from("daily_reports")
     .insert({
@@ -623,41 +654,25 @@ export async function createDailyReportWithTasks(
       stage_id: input.stageId ?? null,
       items: itemsPayload,
       created_by: createdByUserId,
-      // account_id ustawia się przez default current_account_id()
     })
     .select("id")
     .single();
 
-  if (reportErr) {
-    console.error("createDailyReportWithTasks: daily_reports insert error:", {
-      code: (reportErr as any).code,
-      message: reportErr.message,
-      details: (reportErr as any).details,
-      hint: (reportErr as any).hint,
-    });
-    throw new Error(
-      reportErr.message || "Nie udało się zapisać raportu dziennego."
-    );
-  }
+  if (reportErr) throw new Error(reportErr.message || "Nie udało się zapisać raportu.");
 
   const reportId: string = (reportRow as any).id;
-  if (!reportId) {
-    throw new Error("createDailyReportWithTasks: daily_reports nie zwrócił id.");
-  }
+  if (!reportId) throw new Error("Brak id raportu.");
 
-  // 5. Jeśli nie ma zadań -> kończymy
   const completedTasks = input.completedTasks ?? [];
   if (completedTasks.length === 0) {
     refresh(["/reports/daily"]);
     return reportId;
   }
 
-  // 6. Dla każdego zakończonego zadania:
   for (const task of completedTasks) {
     const taskId = String(task.taskId || "").trim();
     if (!taskId) continue;
 
-    // 6.1 task_completions
     const { data: completionRow, error: compErr } = await supabase
       .from("task_completions")
       .insert({
@@ -665,31 +680,14 @@ export async function createDailyReportWithTasks(
         daily_report_id: reportId,
         completed_by_member_id: task.completedByMemberId ?? null,
         note: task.note ?? null,
-        // account_id ustawi trigger task_completions_set_account_id()
       })
       .select("id")
       .single();
 
-    if (compErr) {
-      console.error(
-        "createDailyReportWithTasks: task_completions insert error:",
-        {
-          code: (compErr as any).code,
-          message: compErr.message,
-          details: (compErr as any).details,
-          hint: (compErr as any).hint,
-        }
-      );
-      // nie przerywamy brutalnie całego procesu – ale informujemy
-      throw new Error(
-        compErr.message ||
-          "Nie udało się zapisać informacji o zakończonym zadaniu."
-      );
-    }
+    if (compErr) throw new Error(compErr.message || "Nie udało się zapisać zakończenia zadania.");
 
     const completionId: string = (completionRow as any).id;
 
-    // 6.2 task_completion_attachments – tylko jeśli mamy URL-e
     const photoUrls = task.photoUrls ?? [];
     if (completionId && photoUrls.length > 0) {
       const rows = photoUrls.map((url) => ({
@@ -697,43 +695,14 @@ export async function createDailyReportWithTasks(
         url,
       }));
 
-      const { error: attachErr } = await supabase
-        .from("task_completion_attachments")
-        .insert(rows);
-
-      if (attachErr) {
-        console.error(
-          "createDailyReportWithTasks: attachments insert error:",
-          {
-            code: (attachErr as any).code,
-            message: attachErr.message,
-            details: (attachErr as any).details,
-            hint: (attachErr as any).hint,
-          }
-        );
-        // nie zabijamy raportu – ale logujemy
-      }
+      await supabase.from("task_completion_attachments").insert(rows);
     }
 
-    // 6.3 aktualizacja statusu zadania -> 'done'
-    const { error: updErr } = await supabase
+    await supabase
       .from("project_tasks")
       .update({ status: "done" })
       .eq("id", taskId)
       .neq("status", "done");
-
-    if (updErr) {
-      console.error(
-        "createDailyReportWithTasks: project_tasks update error:",
-        {
-          code: (updErr as any).code,
-          message: updErr.message,
-          details: (updErr as any).details,
-          hint: (updErr as any).hint,
-        }
-      );
-      // tutaj też tylko log – status zawsze można poprawić ręcznie z UI
-    }
   }
 
   refresh(["/reports/daily", "/tasks", "/object"]);

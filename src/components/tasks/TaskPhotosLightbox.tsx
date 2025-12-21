@@ -1,12 +1,19 @@
-// src/components/tasks/TaskPhotosLightbox.tsx
 "use client";
 
 import { useEffect, useState } from "react";
+import { PERM, can, canAny } from "@/lib/permissions";
+import { usePermissionSnapshot } from "@/lib/RoleContext";
+
+export type TaskPhotoItem = {
+  id: string;
+  url: string; // signed URL do wyświetlenia
+  path: string; // storage path do usuwania
+};
 
 type Props = {
-  photos: string[];
+  photos: TaskPhotoItem[];
   taskId: string;
-  deleteAction: (formData: FormData) => Promise<void> | void;
+  deleteAction?: (formData: FormData) => Promise<void> | void;
 };
 
 export default function TaskPhotosLightbox({
@@ -14,6 +21,18 @@ export default function TaskPhotosLightbox({
   taskId,
   deleteAction,
 }: Props) {
+  const snapshot = usePermissionSnapshot();
+
+  const canSeePhotos = can(snapshot, PERM.TASKS_UPLOAD_PHOTOS);
+  const canDeletePhotos = canAny(snapshot, [
+    PERM.TASKS_UPDATE_ALL,
+    PERM.TASKS_UPDATE_OWN,
+  ]);
+
+  if (!canSeePhotos) {
+    return <p className="text-xs text-foreground/60">Brak dostępu do zdjęć.</p>;
+  }
+
   const [openIndex, setOpenIndex] = useState<number | null>(null);
 
   const hasPhotos = Array.isArray(photos) && photos.length > 0;
@@ -38,7 +57,6 @@ export default function TaskPhotosLightbox({
     });
   };
 
-  // klawisze: Esc, strzałki – HOOK ZAWSZE SIĘ WYWOUJE
   useEffect(() => {
     if (!hasPhotos || openIndex === null) return;
 
@@ -50,15 +68,11 @@ export default function TaskPhotosLightbox({
 
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasPhotos, openIndex]);
 
-  // ------------------ RENDER ------------------
   if (!hasPhotos) {
-    return (
-      <p className="text-xs text-foreground/60">
-        Brak zdjęć.
-      </p>
-    );
+    return <p className="text-xs text-foreground/60">Brak zdjęć.</p>;
   }
 
   const safeIndex =
@@ -66,36 +80,43 @@ export default function TaskPhotosLightbox({
       ? openIndex
       : null;
 
+  const showDelete = !!deleteAction && canDeletePhotos;
+
   return (
     <>
       {/* MINIATURY */}
       <div className="flex flex-wrap gap-3">
-        {photos.map((url, i) => (
+        {photos.map((p, i) => (
           <div
-            key={i}
+            key={p.id}
             className="relative w-32 h-32 rounded-lg overflow-hidden border border-border/70 group"
           >
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src={url}
+              src={p.url}
               className="object-cover w-full h-full cursor-zoom-in"
               onClick={() => setOpenIndex(i)}
+              alt=""
             />
 
-            {/* Usuń zdjęcie – przycisk na miniaturze */}
-            <form
-              action={deleteAction}
-              className="absolute top-1 right-1"
-            >
-              <input type="hidden" name="task_id" value={taskId} />
-              <input type="hidden" name="photo_url" value={url} />
-              <button
-                type="submit"
-                className="rounded-full bg-black/70 px-1.5 py-0.5 text-[10px] text-white opacity-0 group-hover:opacity-100 transition-opacity"
-              >
-                ×
-              </button>
-            </form>
+            {/* Usuń zdjęcie – tylko jeśli deleteAction istnieje + user ma prawo edycji */}
+            {showDelete && (
+              <form action={deleteAction} className="absolute top-1 right-1">
+                <input type="hidden" name="task_id" value={taskId} />
+
+                {/* ✅ nazwy pól zgodne z actions.ts */}
+                <input type="hidden" name="photo_id" value={p.id} />
+                <input type="hidden" name="photo_path" value={p.path} />
+
+                <button
+                  type="submit"
+                  className="rounded-full bg-black/70 px-1.5 py-0.5 text-[10px] text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                  aria-label="Usuń zdjęcie"
+                >
+                  ×
+                </button>
+              </form>
+            )}
           </div>
         ))}
       </div>
@@ -103,38 +124,38 @@ export default function TaskPhotosLightbox({
       {/* LIGHTBOX */}
       {safeIndex !== null && (
         <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center">
-          {/* Zamknij */}
           <button
             className="absolute top-4 right-4 text-white text-2xl"
             onClick={close}
             aria-label="Zamknij"
+            type="button"
           >
             ×
           </button>
 
-          {/* Poprzednie */}
           <button
             className="absolute left-4 text-white text-4xl"
             onClick={prev}
             aria-label="Poprzednie zdjęcie"
+            type="button"
           >
             ‹
           </button>
 
-          {/* Następne */}
           <button
             className="absolute right-4 text-white text-4xl"
             onClick={next}
             aria-label="Następne zdjęcie"
+            type="button"
           >
             ›
           </button>
 
-          {/* Obraz */}
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
-            src={photos[safeIndex]}
+            src={photos[safeIndex].url}
             className="max-h-[90vh] max-w-[90vw] rounded-lg shadow-xl"
+            alt=""
           />
         </div>
       )}

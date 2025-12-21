@@ -1,202 +1,216 @@
-// app/reports/items/page.tsx
-import { supabase } from "@/lib/supabaseClient";
+// src/app/(app)/reports/items/page.tsx
+import Link from "next/link";
 
-type Row = {
-  material_id: string;
-  name: string | null;
-  unit: string | null;
-  image_url: string | null;
-  base_quantity: number | null;
-  current_quantity: number | null;
-  total_ordered_qty: number | null;
-  total_ordered_cost: number | null;
-  last_delivery_at: string | null;
-  last_usage_at: string | null;
-};
+import { supabaseServer } from "@/lib/supabaseServer";
+import { safeQuery } from "@/lib/safeQuery";
+import ItemsReportFilters from "@/app/(app)/reports/items/_components/ItemsReportFilters";
+import { getPermissionSnapshot } from "@/lib/currentUser";
+import { can, PERM } from "@/lib/permissions";
 
-function pct(numerator: number, denominator: number) {
-  if (!denominator || denominator <= 0) return 0;
-  return Math.max(0, Math.min(100, (numerator / denominator) * 100));
+type SP = Record<string, string | string[] | undefined>;
+
+function sp1(sp: SP, key: string): string | null {
+  const v = sp[key];
+  if (!v) return null;
+  return Array.isArray(v) ? v[0] ?? null : v;
 }
 
-export default async function Page({
+type Row = {
+  id: string;
+  title: string;
+  unit: string | null;
+  current_quantity: number | null;
+  base_quantity: number | null;
+  deleted_at: string | null;
+};
+
+function fmtQty(n: number | null) {
+  if (n === null || n === undefined) return "—";
+  const nf = new Intl.NumberFormat("pl-PL", { maximumFractionDigits: 3 });
+  return nf.format(n);
+}
+
+function stockPct(current: number | null, base: number | null) {
+  const c = typeof current === "number" ? current : 0;
+  const b = typeof base === "number" ? base : 0;
+  if (!b || b <= 0) return null;
+  const pct = (c / b) * 100;
+  if (!Number.isFinite(pct)) return null;
+  return Math.max(0, Math.min(999, pct));
+}
+
+export default async function ReportsItemsPage({
   searchParams,
 }: {
-  searchParams?: {
-    from?: string; // YYYY-MM-DD
-    to?: string;   // YYYY-MM-DD
-    q?: string;
-    low?: "on" | "off"; // checkbox
-  };
+  searchParams: Promise<SP>;
 }) {
-  const from = searchParams?.from || "";
-  const to = searchParams?.to || "";
-  const q = (searchParams?.q || "").trim();
-  const onlyLow = searchParams?.low === "on";
-
-  // RPC z parametrami (null gdy brak)
-  const { data, error } = await supabase.rpc("items_overview", {
-    from_date: from || null,
-    to_date: to || null,
-    q: q || null,
-  });
-
-  const rows = (data as Row[] | null) ?? [];
-  if (error) {
-    console.warn("items_overview error:", error.message ?? error);
+  // ✅ GATE — worker nie ma dostępu
+  const snap = await getPermissionSnapshot();
+  if (!can(snap, PERM.REPORTS_ITEMS_READ)) {
+    return (
+      <div className="rounded-2xl border border-border bg-card p-4">
+        <div className="text-sm text-foreground/80">Brak dostępu.</div>
+      </div>
+    );
   }
 
-  // Filtrowanie "Tylko low stock" po stronie klienta:
-  // low stock: current_quantity <= 25% base_quantity (jeśli base_quantity > 0)
-  const filtered = rows.filter((r) => {
-    if (!onlyLow) return true;
-    const base = r.base_quantity ?? 0;
-    const cur = r.current_quantity ?? 0;
-    if (base <= 0) return false;
-    return cur <= 0.25 * base;
-  });
+  const sp = await searchParams;
 
-  const fmt = new Intl.NumberFormat("pl-PL", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+  const q = (sp1(sp, "q") ?? "").trim();
+  const status = (sp1(sp, "status") ?? "active") as "active" | "deleted" | "all";
+  const stock = (sp1(sp, "stock") ?? "all") as "in" | "all";
 
-  const dt = (s: string | null) =>
-    s ? new Date(s).toLocaleString("pl-PL") : "—";
+  const supabase = await supabaseServer();
+
+  let query = supabase
+    .from("materials")
+    .select("id,title,unit,current_quantity,base_quantity,deleted_at")
+    .order("title", { ascending: true })
+    .limit(500);
+
+  if (q) query = query.ilike("title", `%${q}%`);
+  if (status === "active") query = query.is("deleted_at", null);
+  if (status === "deleted") query = query.not("deleted_at", "is", null);
+  if (stock === "in") query = query.gt("current_quantity", 0);
+
+  const res = await safeQuery(query);
+  const rows = (res.data ?? []) as Row[];
 
   return (
-    <main className="p-6 space-y-4">
-      <h1 className="text-2xl font-semibold"> Wszystkie przedmioty</h1>
-
-      {/* FILTRY */}
-      <form className="border rounded p-3 grid gap-3 md:grid-cols-6" method="get">
-        <label className="text-sm">
-          <span className="block text-zinc-400 mb-1">Od</span>
-          <input
-            type="date"
-            name="from"
-            defaultValue={from}
-            className="w-full border rounded p-2 bg-transparent"
-          />
-        </label>
-
-        <label className="text-sm">
-          <span className="block text-zinc-400 mb-1">Do</span>
-          <input
-            type="date"
-            name="to"
-            defaultValue={to}
-            className="w-full border rounded p-2 bg-transparent"
-          />
-        </label>
-
-        <label className="text-sm md:col-span-3">
-          <span className="block text-zinc-400 mb-1">Szukaj (nazwa)</span>
-          <input
-            name="q"
-            placeholder="np. Kontownik stalowy"
-            defaultValue={q}
-            className="w-full border rounded p-2 bg-transparent"
-          />
-        </label>
-
-        <label className="flex items-center gap-2 md:col-span-6 text-sm">
-          <input type="checkbox" name="low" defaultChecked={onlyLow} />
-          <span>Tylko low stock (≤ 25% stanu bazowego)</span>
-        </label>
-
-        <div className="flex items-end gap-2 md:col-span-6">
-          <button className="px-3 py-2 border rounded" type="submit">
-            Zastosuj
-          </button>
-          <a href="/reports/items" className="px-3 py-2 border rounded">
-            Wyczyść
-          </a>
+    <div className="space-y-4">
+      {/* HEADER (KANON) */}
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-sm font-medium">Wszystkie materiały</h1>
+          <p className="text-xs opacity-70">
+            Lista materiałów — aktywne i usunięte. Kliknij w pozycję, aby wejść w szczegóły.
+          </p>
         </div>
-      </form>
 
-      {/* LISTA KART */}
-      <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-        {filtered.map((r) => {
-          const cur = r.current_quantity ?? 0;
-          const totalOrdered = r.total_ordered_qty ?? 0;
-          const percentOfOrdered = pct(cur, totalOrdered);
-
-          return (
-            <div
-              key={r.material_id}
-              className="border rounded p-3 flex gap-3 items-start"
-            >
-              <div className="w-16 h-16 shrink-0 rounded overflow-hidden bg-zinc-900/40 flex items-center justify-center">
-                {r.image_url ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={r.image_url}
-                    alt={r.name ?? ""}
-                    className="w-full h-full object-cover"
-                  />
-                ) : (
-                  <span className="text-xs text-zinc-500">brak</span>
-                )}
-              </div>
-
-              <div className="flex-1 space-y-1">
-                <div className="flex items-center justify-between">
-                  <div className="font-medium">{r.name ?? "—"}</div>
-                  <div className="text-xs text-zinc-400">{r.unit ?? "—"}</div>
-                </div>
-
-                {/* Stan: AKTUALNIE / ZAMÓWIONO ŁĄCZNIE (+ %) */}
-                <div className="text-sm">
-                  <div>
-                    <span className="text-zinc-400">Aktualnie:</span>{" "}
-                    <span className="font-mono">{cur}</span>
-                  </div>
-                  <div>
-                    <span className="text-zinc-400">Zamówiono łącznie (w zakresie):</span>{" "}
-                    <span className="font-mono">{totalOrdered}</span>
-                    {totalOrdered > 0 && (
-                      <span className="ml-2 text-xs text-zinc-400">
-                        ({percentOfOrdered.toFixed(0)}% aktualnego vs zamówione)
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Ostatnie zdarzenia */}
-                <div className="text-xs text-zinc-400">
-                  <div>Ostatnia dostawa: {dt(r.last_delivery_at)}</div>
-                  <div>Ostatnie zużycie: {dt(r.last_usage_at)}</div>
-                </div>
-
-                {/* Koszt łączny */}
-                <div className="text-sm">
-                  <span className="text-zinc-400">Łączny koszt:</span>{" "}
-                  <span className="font-mono">
-                    {fmt.format(r.total_ordered_cost ?? 0)} PLN
-                  </span>
-                </div>
-
-                {/* Pasek procentowy względem zamówionych (jeśli ma sens) */}
-                {totalOrdered > 0 && (
-                  <div className="mt-2 h-2 w-full bg-zinc-800 rounded">
-                    <div
-                      className="h-2 bg-zinc-200 rounded"
-                      style={{ width: `${percentOfOrdered}%` }}
-                    />
-                  </div>
-                )}
-              </div>
-            </div>
-          );
-        })}
-
-        {filtered.length === 0 && (
-          <div className="md:col-span-2 lg:col-span-3 text-sm text-zinc-500">
-            Brak wyników (zmień filtry).
-          </div>
-        )}
+        <Link
+          href="/reports"
+          className="px-3 py-2 rounded border border-border bg-card hover:bg-card/80 text-xs transition"
+        >
+          ← Wróć do raportów
+        </Link>
       </div>
-    </main>
+
+      {/* FILTERS */}
+      <ItemsReportFilters q={q} status={status} stock={stock} />
+
+      {/* META */}
+      <div className="rounded-2xl border border-border bg-card p-3 flex items-center justify-between gap-3">
+        <div className="text-xs opacity-70">
+          Wyniki: <span className="font-semibold opacity-100">{rows.length}</span>
+          <span className="mx-2 opacity-40">•</span>
+          Limit: <span className="font-semibold opacity-100">500</span>
+        </div>
+
+        <div className="text-[11px] px-2 py-1 rounded bg-background/60 border border-border">
+          Lista (kafle)
+        </div>
+      </div>
+
+      {/* LISTA (KANON: każdy wiersz = karta-guzik) */}
+      {rows.length === 0 ? (
+        <div className="rounded-2xl border border-border bg-card p-4 text-sm opacity-70">
+          Brak wyników.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {rows.map((r) => {
+            const isDeleted = !!r.deleted_at;
+            const pct = stockPct(r.current_quantity, r.base_quantity);
+
+            const statusChip = isDeleted
+              ? "bg-red-600/20 text-red-300 border border-red-500/40"
+              : "bg-emerald-600/20 text-emerald-300 border border-emerald-500/40";
+
+            const statusText = isDeleted ? "usunięty" : "aktywny";
+
+            const href = `/materials/${r.id}`;
+
+            return (
+              <Link
+                key={r.id}
+                href={href}
+                className={[
+                  "block rounded-2xl border border-border bg-card px-4 py-3",
+                  "transition will-change-transform hover:bg-card/80 hover:border-border/80 active:scale-[0.995]",
+                  "focus:outline-none focus:ring-2 focus:ring-foreground/40",
+                ].join(" ")}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  {/* LEFT */}
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className="text-sm font-medium truncate">{r.title}</div>
+
+                      {r.unit ? (
+                        <span className="text-[11px] opacity-70 border border-border rounded px-2 py-1 bg-background/40">
+                          {r.unit}
+                        </span>
+                      ) : null}
+
+                      <span className={`text-[10px] px-2 py-0.5 rounded ${statusChip}`}>
+                        {statusText}
+                      </span>
+
+                      <span className="text-[10px] opacity-70 font-mono underline underline-offset-2">
+                        #{r.id.slice(0, 8)}
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap gap-3 text-[11px] pt-1">
+                      <span className="opacity-75">
+                        Aktualnie:{" "}
+                        <strong className="opacity-100">{fmtQty(r.current_quantity)}</strong>
+                      </span>
+                      <span className="opacity-75">
+                        Bazowo:{" "}
+                        <strong className="opacity-100">{fmtQty(r.base_quantity)}</strong>
+                      </span>
+
+                      {pct !== null ? (
+                        <span className="opacity-75">
+                          Zapasy:{" "}
+                          <strong className="opacity-100">
+                            {Math.round(pct)}%
+                          </strong>
+                        </span>
+                      ) : (
+                        <span className="opacity-60">Zapasy: —</span>
+                      )}
+                    </div>
+
+                    {/* PROGRES (subtelny, kanoniczny) */}
+                    {pct !== null ? (
+                      <div className="pt-2">
+                        <div className="h-2 w-full rounded-full bg-background/40 border border-border overflow-hidden">
+                          <div
+                            className="h-full bg-foreground/80"
+                            style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
+                          />
+                        </div>
+                        <div className="text-[11px] opacity-60 pt-1">
+                          {pct <= 25 ? "Niski stan (≤25%)" : "OK"}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {/* RIGHT */}
+                  <div className="shrink-0 flex items-center gap-2">
+                    <span className="px-3 py-2 rounded border border-border bg-background text-xs hover:bg-background/80 transition">
+                      Szczegóły →
+                    </span>
+                  </div>
+                </div>
+              </Link>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }

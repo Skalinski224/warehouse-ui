@@ -1,116 +1,186 @@
-'use client';
+"use client";
 
-import { useState } from 'react';
+import { useMemo, useState } from "react";
 
-type Member = {
+export type TeamRow = {
   id: string;
   user_id: string | null;
   email: string | null;
-  first_name: string;
-  last_name: string;
+  first_name: string | null;
+  last_name: string | null;
   phone: string | null;
-  role: 'manager' | 'storeman' | 'worker';
+  crew_id: string | null;
+  crew_name?: string | null;
+  status?: string | null; // optional: active/invited/disabled
   created_at: string;
 };
 
-export default function TeamTable({ initial }: { initial: Member[] }) {
-  const [rows, setRows] = useState<Member[]>(initial);
+type CrewOption = { id: string; name: string };
+
+type EditPayload = {
+  id: string;
+  first_name?: string | null;
+  last_name?: string | null;
+  phone?: string | null;
+  // Foreman: tylko crew_id, Manager/Owner: może też dane osobowe (jeśli chcesz)
+  crew_id?: string | null;
+};
+
+type Props = {
+  initial: TeamRow[];
+
+  // Jeśli undefined → UI ukrywa możliwość edycji (read-only)
+  onEdit?: (payload: EditPayload) => Promise<void>;
+
+  // jeśli masz listę brygad i chcesz selektor:
+  crewOptions?: CrewOption[];
+
+  // jeśli false → nie renderujemy linków/szczegółów
+  canOpenDetails: boolean;
+};
+
+export default function TeamTable({
+  initial,
+  onEdit,
+  crewOptions,
+  canOpenDetails,
+}: Props) {
+  const [rows, setRows] = useState<TeamRow[]>(initial);
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  async function save(m: Member) {
+  const canEdit = typeof onEdit === "function";
+  const hasCrews = Array.isArray(crewOptions) && crewOptions.length > 0;
+
+  function setField(id: string, patch: Partial<TeamRow>) {
+    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  }
+
+  async function save(m: TeamRow) {
+    if (!onEdit) return;
     setBusyId(m.id);
     try {
-      const res = await fetch(`/api/team/member/${m.id}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          first_name: m.first_name,
-          last_name: m.last_name,
-          phone: m.phone,
-          role: m.role,
-        }),
+      await onEdit({
+        id: m.id,
+        first_name: m.first_name ?? null,
+        last_name: m.last_name ?? null,
+        phone: m.phone ?? null,
+        crew_id: m.crew_id ?? null,
       });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json.error || 'Błąd zapisu');
-      alert('✅ Zapisano');
     } catch (e: any) {
-      alert(e.message || 'Błąd');
+      alert(e?.message ?? "Błąd zapisu");
     } finally {
       setBusyId(null);
     }
   }
 
+  const crewNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    (crewOptions ?? []).forEach((c) => map.set(c.id, c.name));
+    return map;
+  }, [crewOptions]);
+
   return (
     <table className="w-full text-sm">
-      <thead className="text-left opacity-70">
+      <thead className="text-left text-foreground/70">
         <tr>
           <th className="py-2 pr-3">ID</th>
           <th className="py-2 pr-3">Imię</th>
           <th className="py-2 pr-3">Nazwisko</th>
           <th className="py-2 pr-3">Telefon</th>
           <th className="py-2 pr-3">Email</th>
-          <th className="py-2 pr-3">Rola</th>
+          <th className="py-2 pr-3">Brygada</th>
           <th className="py-2 pr-3">Utworzony</th>
-          <th className="py-2">Akcje</th>
+          {canEdit && <th className="py-2">Akcje</th>}
         </tr>
       </thead>
+
       <tbody>
-        {rows.map((m) => (
-          <tr key={m.id} className="border-t border-border">
-            <td className="py-2 pr-3">{m.user_id?.slice(0, 8) || '—'}</td>
-            <td className="py-2 pr-3">
-              <input
-                className="border rounded p-1 bg-transparent"
-                value={m.first_name}
-                onChange={(e) =>
-                  setRows((rs) => rs.map(r => r.id === m.id ? { ...r, first_name: e.target.value } : r))
-                }
-              />
-            </td>
-            <td className="py-2 pr-3">
-              <input
-                className="border rounded p-1 bg-transparent"
-                value={m.last_name}
-                onChange={(e) =>
-                  setRows((rs) => rs.map(r => r.id === m.id ? { ...r, last_name: e.target.value } : r))
-                }
-              />
-            </td>
-            <td className="py-2 pr-3">
-              <input
-                className="border rounded p-1 bg-transparent"
-                value={m.phone ?? ''}
-                onChange={(e) =>
-                  setRows((rs) => rs.map(r => r.id === m.id ? { ...r, phone: e.target.value } : r))
-                }
-              />
-            </td>
-            <td className="py-2 pr-3">{m.email ?? '—'}</td>
-            <td className="py-2 pr-3">
-              <select
-                className="border rounded p-1 bg-transparent"
-                value={m.role}
-                onChange={(e) =>
-                  setRows((rs) => rs.map(r => r.id === m.id ? { ...r, role: e.target.value as Member['role'] } : r))
-                }
-              >
-                <option value="worker">worker</option>
-                <option value="storeman">storeman</option>
-                <option value="manager">manager</option>
-              </select>
-            </td>
-            <td className="py-2 pr-3">{new Date(m.created_at).toLocaleDateString()}</td>
-            <td className="py-2">
-              <button
-                className="border rounded px-2 py-1"
-                onClick={() => save(m)}
-                disabled={busyId === m.id}
-              >
-                {busyId === m.id ? 'Zapisuję…' : 'Zapisz'}
-              </button>
-            </td>
-          </tr>
-        ))}
+        {rows.map((m) => {
+          const created = m.created_at ? new Date(m.created_at).toLocaleDateString() : "—";
+          const shortId = m.user_id?.slice(0, 8) || m.id.slice(0, 8);
+
+          const crewLabel =
+            m.crew_name ??
+            (m.crew_id ? crewNameById.get(m.crew_id) ?? "—" : "—");
+
+          return (
+            <tr key={m.id} className="border-t border-border">
+              <td className="py-2 pr-3">
+                {canOpenDetails ? (
+                  <a className="hover:underline" href={`/team/${m.id}`}>
+                    {shortId}
+                  </a>
+                ) : (
+                  <span>{shortId}</span>
+                )}
+              </td>
+
+              <td className="py-2 pr-3">
+                <input
+                  className="border rounded p-1 bg-transparent w-full"
+                  value={m.first_name ?? ""}
+                  disabled={!canEdit}
+                  onChange={(e) => setField(m.id, { first_name: e.target.value })}
+                />
+              </td>
+
+              <td className="py-2 pr-3">
+                <input
+                  className="border rounded p-1 bg-transparent w-full"
+                  value={m.last_name ?? ""}
+                  disabled={!canEdit}
+                  onChange={(e) => setField(m.id, { last_name: e.target.value })}
+                />
+              </td>
+
+              <td className="py-2 pr-3">
+                <input
+                  className="border rounded p-1 bg-transparent w-full"
+                  value={m.phone ?? ""}
+                  disabled={!canEdit}
+                  onChange={(e) => setField(m.id, { phone: e.target.value })}
+                />
+              </td>
+
+              <td className="py-2 pr-3">{m.email ?? "—"}</td>
+
+              <td className="py-2 pr-3">
+                {canEdit && hasCrews ? (
+                  <select
+                    className="border rounded p-1 bg-transparent w-full"
+                    value={m.crew_id ?? ""}
+                    onChange={(e) =>
+                      setField(m.id, { crew_id: e.target.value || null })
+                    }
+                  >
+                    <option value="">— brak —</option>
+                    {crewOptions!.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className="opacity-80">{crewLabel}</span>
+                )}
+              </td>
+
+              <td className="py-2 pr-3">{created}</td>
+
+              {canEdit && (
+                <td className="py-2">
+                  <button
+                    className="border rounded px-2 py-1"
+                    onClick={() => save(m)}
+                    disabled={busyId === m.id}
+                  >
+                    {busyId === m.id ? "Zapisuję…" : "Zapisz"}
+                  </button>
+                </td>
+              )}
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );

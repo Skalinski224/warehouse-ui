@@ -1,40 +1,17 @@
-// src/lib/uploads/invoices.ts
+// src/lib/uploads/invoices.server.ts
+import "server-only";
 
-import type { SupabaseClient } from "@supabase/supabase-js";
-
-const INVOICES_BUCKET = "invoices";
-
-/**
- * Buduje ścieżkę w buckecie "invoices" dla danej dostawy.
- * Przykład:  accountId/deliveries/<deliveryId>/1731973412345-faktura.pdf
- */
-export function buildInvoicePath(
-  accountId: string,
-  deliveryId: string,
-  fileName: string
-): string {
-  const safeAccount = (accountId || "unknown").trim();
-  const safeDelivery = (deliveryId || "unknown").trim();
-
-  const dotIdx = fileName.lastIndexOf(".");
-  const base = dotIdx > -1 ? fileName.slice(0, dotIdx) : fileName;
-  const ext = dotIdx > -1 ? fileName.slice(dotIdx + 1) : "pdf";
-
-  const slugBase = base
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 60);
-
-  const safeExt = ext.toLowerCase().replace(/[^a-z0-9]/g, "") || "pdf";
-
-  const ts = Date.now();
-
-  return `${safeAccount}/deliveries/${safeDelivery}/${ts}-${slugBase}.${safeExt}`;
-}
+import { supabaseServer } from "@/lib/supabaseServer";
+import {
+  PERM,
+  canAny,
+  can,
+  type PermissionKey,
+  type PermissionSnapshot,
+} from "@/lib/permissions";
+import { buildInvoicePath, INVOICES_BUCKET } from "@/lib/uploads/invoicePaths";
 
 export type UploadInvoiceParams = {
-  supabase: SupabaseClient<any, "public", any>;
   file: File;
   accountId: string;
   deliveryId: string;
@@ -49,26 +26,118 @@ export type UploadInvoiceResult = {
   error: string | null;
 };
 
+export type GetSignedUrlParams = {
+  /** Ścieżka w buckecie, np. to co zapisaliśmy w deliveries.invoice_url */
+  path: string;
+  /** Czas ważności linku w sekundach (domyślnie 1h) */
+  expiresIn?: number;
+};
+
+/* -------------------------------------------------------------------------- */
+/*                               INTERNAL HELPERS                             */
+/* -------------------------------------------------------------------------- */
+
+type SbClient = Awaited<ReturnType<typeof supabaseServer>>;
+
+async function getSnapshot(sb: SbClient): Promise<PermissionSnapshot | null> {
+  const { data, error } = await sb.rpc("my_permissions_snapshot");
+  if (error) return null;
+  return (Array.isArray(data) ? (data[0] ?? null) : (data ?? null)) as any;
+}
+
+async function getCurrentAccountId(sb: SbClient): Promise<string | null> {
+  const { data, error } = await sb.rpc("current_account_id");
+  if (error) return null;
+
+  if (typeof data === "string") return data;
+
+  if (data && typeof data === "object") {
+    const maybe =
+      (data as any).current_account_id ??
+      (data as any).account_id ??
+      null;
+    return typeof maybe === "string" ? maybe : null;
+  }
+
+  return null;
+}
+
+async function guardAccountAndPerm(
+  sb: SbClient,
+  paramsAccountId: string,
+  needAnyPerm: PermissionKey[]
+): Promise<
+  | { ok: true; snap: PermissionSnapshot; currentAccountId: string }
+  | { ok: false; error: string }
+> {
+  const [snap, currentAccountId] = await Promise.all([
+    getSnapshot(sb),
+    getCurrentAccountId(sb),
+  ]);
+
+  if (!snap || !currentAccountId) {
+    return { ok: false, error: "Brak autoryzacji" };
+  }
+
+  if (currentAccountId !== paramsAccountId) {
+    return { ok: false, error: "Brak dostępu (account mismatch)" };
+  }
+
+  if (!canAny(snap, needAnyPerm)) {
+    return { ok: false, error: "Brak uprawnień" };
+  }
+
+  return { ok: true, snap, currentAccountId };
+}
+
+function safeContentType(file: File): string {
+  const t = (file.type || "").toLowerCase().trim();
+  // Twardy fallback; nie blokujemy uploadu tylko dlatego, że browser nie podał typu.
+  return t || "application/octet-stream";
+}
+
+/* -------------------------------------------------------------------------- */
+/*                                  API                                       */
+/* -------------------------------------------------------------------------- */
+
 /**
  * Upload faktury do bucketa "invoices".
- * Zwraca path (do zapisania w deliveries.invoice_url) oraz publicUrl (jeśli potrzebujesz).
+ * Zwraca path (do zapisania w deliveries.invoice_url) oraz publicUrl (jeśli bucket publiczny).
+ *
+ * UWAGA: To jest SERVER-ONLY. Wywołuj przez Server Action / Route Handler.
  */
 export async function uploadInvoiceFile(
   params: UploadInvoiceParams
 ): Promise<UploadInvoiceResult> {
-  const { supabase, file, accountId, deliveryId } = params;
+  const { file, accountId, deliveryId } = params;
 
-  if (!file || file.size === 0) {
+  if (!accountId || !deliveryId) {
+    return { path: null, publicUrl: null, error: "Brak accountId lub deliveryId" };
+  }
+
+  if (!file || typeof file.size !== "number" || file.size <= 0) {
     return { path: null, publicUrl: null, error: "Brak pliku faktury" };
+  }
+
+  const sb = await supabaseServer();
+
+  // ✅ Gate: tylko ktoś kto może tworzyć/edytować dostawy może uploadować fakturę
+  const guard = await guardAccountAndPerm(sb, accountId, [
+    PERM.DELIVERIES_CREATE,
+    PERM.DELIVERIES_UPDATE_UNAPPROVED,
+  ]);
+
+  if (!guard.ok) {
+    return { path: null, publicUrl: null, error: guard.error };
   }
 
   const path = buildInvoicePath(accountId, deliveryId, file.name);
 
-  const { error: uploadError } = await supabase.storage
+  const { error: uploadError } = await sb.storage
     .from(INVOICES_BUCKET)
     .upload(path, file, {
       upsert: true,
-      contentType: file.type || "application/octet-stream",
+      contentType: safeContentType(file),
     });
 
   if (uploadError) {
@@ -80,11 +149,8 @@ export async function uploadInvoiceFile(
     };
   }
 
-  // Nawet jeśli bucket jest prywatny, getPublicUrl zwróci URL,
-  // ale dostęp może wymagać podpisu. To pole jest opcjonalne.
-  const { data: pub } = supabase.storage
-    .from(INVOICES_BUCKET)
-    .getPublicUrl(path);
+  // Jeśli bucket publiczny – będzie działać; jeśli prywatny – używaj signed url.
+  const { data: pub } = sb.storage.from(INVOICES_BUCKET).getPublicUrl(path);
 
   return {
     path,
@@ -93,26 +159,34 @@ export async function uploadInvoiceFile(
   };
 }
 
-export type GetSignedUrlParams = {
-  supabase: SupabaseClient<any, "public", any>;
-  /** Ścieżka w buckecie, np. to co zapisaliśmy w deliveries.invoice_url */
-  path: string;
-  /** Czas ważności linku w sekundach (domyślnie 1h) */
-  expiresIn?: number;
-};
-
 /**
  * Tworzy podpisany URL do faktury na podstawie ścieżki w buckecie.
- * Użyteczne w raportach / widoku szczegółowym dostawy przy prywatnym buckecie.
+ * Przydatne gdy bucket jest prywatny.
+ *
+ * UWAGA: SERVER-ONLY. Wywołuj przez Server Action / Route Handler.
  */
 export async function getInvoiceSignedUrl(
   params: GetSignedUrlParams
 ): Promise<string | null> {
-  const { supabase, path, expiresIn = 3600 } = params;
-
+  const { path, expiresIn = 3600 } = params;
   if (!path) return null;
 
-  const { data, error } = await supabase.storage
+  const sb = await supabaseServer();
+  const snap = await getSnapshot(sb);
+  if (!snap) return null;
+
+  // Musi mieć uprawnienia do czytania faktur w raportach albo ogólnie dostaw
+  if (!can(snap, PERM.REPORTS_DELIVERIES_INVOICES_READ) && !can(snap, PERM.DELIVERIES_READ)) {
+    return null;
+  }
+
+  const currentAccountId = await getCurrentAccountId(sb);
+  if (!currentAccountId) return null;
+
+  // multi-tenant: ścieżka musi należeć do aktualnego konta
+  if (!path.startsWith(`${currentAccountId}/`)) return null;
+
+  const { data, error } = await sb.storage
     .from(INVOICES_BUCKET)
     .createSignedUrl(path, expiresIn);
 
@@ -125,18 +199,35 @@ export async function getInvoiceSignedUrl(
 }
 
 /**
- * Opcjonalnie: usuwanie starej faktury z bucketa, np. przy podmianie pliku.
+ * Usuwa fakturę z bucketa (np. przy podmianie pliku).
+ *
+ * UWAGA: SERVER-ONLY. Wywołuj przez Server Action / Route Handler.
  */
 export async function deleteInvoiceFile(
-  supabase: SupabaseClient<any, "public", any>,
   path: string | null | undefined
 ): Promise<void> {
   if (!path) return;
 
-  const { error } = await supabase.storage
-    .from(INVOICES_BUCKET)
-    .remove([path]);
+  const sb = await supabaseServer();
+  const snap = await getSnapshot(sb);
+  if (!snap) return;
 
+  if (
+    !canAny(snap, [
+      PERM.DELIVERIES_UPDATE_UNAPPROVED,
+      PERM.DELIVERIES_DELETE_UNAPPROVED,
+    ])
+  ) {
+    return;
+  }
+
+  const currentAccountId = await getCurrentAccountId(sb);
+  if (!currentAccountId) return;
+
+  // multi-tenant: nie pozwalamy usuwać cudzych ścieżek
+  if (!path.startsWith(`${currentAccountId}/`)) return;
+
+  const { error } = await sb.storage.from(INVOICES_BUCKET).remove([path]);
   if (error) {
     console.warn("deleteInvoiceFile error:", error.message);
   }

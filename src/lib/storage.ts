@@ -4,6 +4,8 @@ import "server-only";
 
 import { createClient } from "@supabase/supabase-js";
 import { createHash } from "crypto";
+import { supabaseServer } from "@/lib/supabaseServer";
+import { PERM, can, canAny } from "@/lib/permissions";
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!; // TYLKO na serwerze
@@ -55,6 +57,65 @@ export function getPublicUrl(bucket: string, path: string): string {
   return data.publicUrl;
 }
 
+/* -------------------------------------------------------------------------- */
+/*                               SECURITY GUARDS                              */
+/* -------------------------------------------------------------------------- */
+
+async function getSnapshot() {
+  const supabase = await supabaseServer();
+  const { data, error } = await supabase.rpc("my_permissions_snapshot");
+  if (error) return null;
+  return Array.isArray(data) ? (data[0] ?? null) : (data ?? null);
+}
+
+async function getCurrentAccountId(): Promise<string | null> {
+  const supabase = await supabaseServer();
+  // Jeśli masz funkcję current_account_id() wystawioną jako RPC:
+  const { data, error } = await supabase.rpc("current_account_id");
+  if (error) return null;
+  const v = Array.isArray(data) ? data[0] : data;
+  if (typeof v === "string") return v;
+  // czasem supabase zwraca { current_account_id: "..." }
+  if (v && typeof v === "object") {
+    const maybe = (v as any).current_account_id ?? (v as any).account_id ?? null;
+    return typeof maybe === "string" ? maybe : null;
+  }
+  return null;
+}
+
+async function assertAccountMatch(accountId: string) {
+  const current = await getCurrentAccountId();
+  if (!current || current !== accountId) {
+    throw new Error("Brak dostępu (account mismatch).");
+  }
+}
+
+function looksLikeUuid(s: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    s
+  );
+}
+
+async function assertPathAccountMatch(path: string) {
+  const first = String(path ?? "").split("/")[0] ?? "";
+  if (!first || !looksLikeUuid(first)) {
+    // jeśli path nie jest w formacie accountId/..., to nie podpisujemy “w ciemno”
+    throw new Error("Brak dostępu (nieprawidłowa ścieżka obiektu).");
+  }
+  await assertAccountMatch(first);
+}
+
+async function assertCanUploadMaterialImage() {
+  const snap = await getSnapshot();
+  // upload obrazu materiału = edycja materiałów
+  const ok = canAny(snap, [PERM.MATERIALS_WRITE]);
+  if (!ok) throw new Error("Brak dostępu (materials.write).");
+}
+
+/* -------------------------------------------------------------------------- */
+/*                                    API                                     */
+/* -------------------------------------------------------------------------- */
+
 /**
  * Upload z deduplikacją po SHA-256 treści:
  *   ścieżka = {accountId}/materials/{hash}.{ext}
@@ -71,6 +132,10 @@ export async function uploadMaterialImage(params: {
 
   if (!accountId) throw new Error("uploadMaterialImage: wymagany accountId");
   if (!file) throw new Error("uploadMaterialImage: brak pliku");
+
+  // ✅ Guards: permission + account match (nie ufamy params.accountId)
+  await assertCanUploadMaterialImage();
+  await assertAccountMatch(accountId);
 
   // Hash treści (dedupe) – używamy Uint8Array zamiast Buffer
   const ab = await file.arrayBuffer();
@@ -123,6 +188,12 @@ export async function uploadMaterialImageNamed(params: {
 
   if (!materialId)
     throw new Error("uploadMaterialImageNamed: wymagany materialId");
+  if (!accountId) throw new Error("uploadMaterialImageNamed: wymagany accountId");
+  if (!file) throw new Error("uploadMaterialImageNamed: brak pliku");
+
+  // ✅ Guards
+  await assertCanUploadMaterialImage();
+  await assertAccountMatch(accountId);
 
   const ab = await file.arrayBuffer();
   const bytes = new Uint8Array(ab);
@@ -166,6 +237,9 @@ export async function signObject(
   path: string,
   expiresInSec = 900
 ): Promise<string> {
+  // ✅ Guard: nie podpisujemy obcych accountów (path musi zaczynać się od {accountId}/...)
+  await assertPathAccountMatch(path);
+
   const { data, error } = await supa.storage
     .from(bucket)
     .createSignedUrl(path, expiresInSec);

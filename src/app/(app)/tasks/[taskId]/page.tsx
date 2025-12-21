@@ -1,24 +1,23 @@
 // src/app/(app)/tasks/[taskId]/page.tsx
-
-import { notFound } from "next/navigation";
 import Link from "next/link";
+import { notFound, redirect } from "next/navigation";
 
 import { supabaseServer } from "@/lib/supabaseServer";
-import RoleGuard from "@/components/RoleGuard";
+import BackButton from "@/components/BackButton";
 import TaskStatusBadge from "@/components/object/TaskStatusBadge";
-import TaskPhotosLightbox from "@/components/tasks/TaskPhotosLightbox";
+import TaskPhotosLightbox, { type TaskPhotoItem } from "@/components/tasks/TaskPhotosLightbox";
 import TaskPhotosUploader from "@/components/tasks/TaskPhotosUploader";
-import {
-  updateTaskManager,
-  deleteTaskPhoto,
-  softDeleteTask,
-} from "../actions";
 
-/* -------------------------------------------------------- */
-/*                     Typy pomocnicze                      */
-/* -------------------------------------------------------- */
+import { updateTaskManager, deleteTaskPhoto, softDeleteTask } from "../actions";
+import { PERM, can, type PermissionSnapshot } from "@/lib/permissions";
 
 type TaskStatus = "todo" | "in_progress" | "done";
+
+type CrewOption = { id: string; name: string };
+type MemberOption = { id: string; label: string };
+
+type PlaceRow = { id: string; name: string | null; parent_id: string | null };
+export type PlaceCrumb = { id: string; name: string };
 
 type TaskDetailsRow = {
   id: string;
@@ -30,16 +29,11 @@ type TaskDetailsRow = {
   created_by: string | null;
   assigned_crew_id: string | null;
   assigned_member_id: string | null;
-  photos: unknown;
-  crews?: { id: string; name: string | null }[] | null;
-  team_members?:
-    | {
-        id: string;
-        first_name: string | null;
-        last_name: string | null;
-        email: string | null;
-      }[]
-    | null;
+
+  // ⚠️ Supabase dla relacji many-to-one często zwraca OBIEKT, nie tablicę.
+  // Zostawiamy typ „luźny” i normalizujemy w kodzie.
+  crews?: any;
+  team_members?: any;
 };
 
 type TaskDetails = {
@@ -54,34 +48,20 @@ type TaskDetails = {
   memberId: string | null;
   memberLabel: string | null;
   createdByLabel: string | null;
-  photos: string[];
+  photos: TaskPhotoItem[];
   placeChain: PlaceCrumb[];
 };
 
-type CrewOption = {
-  id: string;
-  name: string;
-};
-
-type MemberOption = {
-  id: string;
-  label: string;
-};
-
-type PlaceRow = {
-  id: string;
-  name: string | null;
-  parent_id: string | null;
-};
-
-export type PlaceCrumb = {
-  id: string;
-  name: string;
-};
-
-/* -------------------------------------------------------- */
-/*                Budowa łańcucha miejsca                   */
-/* -------------------------------------------------------- */
+async function fetchMyPermissionsSnapshot(): Promise<PermissionSnapshot | null> {
+  const supabase = await supabaseServer();
+  const { data, error } = await supabase.rpc("my_permissions_snapshot");
+  if (error) {
+    console.error("my_permissions_snapshot error:", error);
+    return null;
+  }
+  const snap = Array.isArray(data) ? (data[0] ?? null) : (data ?? null);
+  return (snap as PermissionSnapshot | null) ?? null;
+}
 
 async function buildPlaceChain(placeId: string): Promise<PlaceCrumb[]> {
   const supabase = await supabaseServer();
@@ -90,40 +70,82 @@ async function buildPlaceChain(placeId: string): Promise<PlaceCrumb[]> {
   let cursorId: string | null = placeId;
 
   while (cursorId) {
-    const { data, error } = await supabase
+    const res: { data: PlaceRow | null; error: any } = await supabase
       .from("project_places")
       .select("id, name, parent_id")
       .eq("id", cursorId)
       .is("deleted_at", null)
       .maybeSingle<PlaceRow>();
 
-    if (error) {
-      console.error("buildPlaceChain error:", error);
+    if (res.error) {
+      console.error("buildPlaceChain error:", res.error);
       break;
     }
-    if (!data) break;
 
-    const placeData = data as PlaceRow;
+    const row: PlaceRow | null = res.data;
+    if (!row) break;
 
-    chain.push({
-      id: placeData.id,
-      name: placeData.name ?? "",
-    });
-
-    cursorId = placeData.parent_id;
+    chain.push({ id: row.id, name: row.name ?? "" });
+    cursorId = row.parent_id;
   }
 
   return chain.reverse();
 }
 
-/* -------------------------------------------------------- */
-/*          FETCH zadania + dane powiązane                  */
-/* -------------------------------------------------------- */
+function normalizeStoragePath(p: string): string {
+  const raw = String(p ?? "").trim();
+  if (!raw) return "";
+  if (raw.startsWith("http://") || raw.startsWith("https://")) {
+    try {
+      const u = new URL(raw);
+      const pathname = u.pathname || "";
+      const marker = "/storage/v1/object/";
+      const i = pathname.indexOf(marker);
+      if (i >= 0) {
+        const rest = pathname.slice(i + marker.length); // "public/task-images/.."
+        const parts = rest.split("/").filter(Boolean);
+        if (parts.length >= 3) return decodeURIComponent(parts.slice(2).join("/"));
+      }
+      return decodeURIComponent(pathname.replace(/^\/+/, ""));
+    } catch {
+      return raw;
+    }
+  }
+  return raw.replace(/^\/+/, "");
+}
+
+async function signTaskImageUrls(rows: { id: string; path: string }[]): Promise<TaskPhotoItem[]> {
+  const supabase = await supabaseServer();
+
+  const out: TaskPhotoItem[] = [];
+  for (const r of rows) {
+    const path = normalizeStoragePath(r.path);
+    if (!path) continue;
+
+    const { data, error } = await supabase.storage.from("task-images").createSignedUrl(path, 60 * 60);
+    if (error) {
+      console.error("createSignedUrl error:", error);
+      continue;
+    }
+    if (!data?.signedUrl) continue;
+
+    out.push({ id: r.id, url: data.signedUrl, path });
+  }
+
+  return out;
+}
+
+function normalizeRelOne<T extends object>(rel: any): T | null {
+  if (!rel) return null;
+  if (Array.isArray(rel)) return (rel[0] ?? null) as T | null;
+  if (typeof rel === "object") return rel as T;
+  return null;
+}
 
 async function fetchTask(taskId: string): Promise<TaskDetails | null> {
   const supabase = await supabaseServer();
 
-  const { data, error } = await supabase
+  const taskRes = await supabase
     .from("project_tasks")
     .select(
       `
@@ -136,67 +158,74 @@ async function fetchTask(taskId: string): Promise<TaskDetails | null> {
         created_by,
         assigned_crew_id,
         assigned_member_id,
-        photos,
         crews ( id, name ),
         team_members ( id, first_name, last_name, email )
       `
     )
     .eq("id", taskId)
     .is("deleted_at", null)
-    .maybeSingle();
+    .maybeSingle()
+    .returns<TaskDetailsRow>();
 
-  if (error) {
-    console.error("fetchTask error:", error);
+  if (taskRes.error) {
+    console.error("fetchTask error:", taskRes.error);
     return null;
   }
-  if (!data) return null;
+  if (!taskRes.data) return null;
 
-  const row = data as TaskDetailsRow;
+  const row = taskRes.data;
 
-  const crewName =
-    Array.isArray(row.crews) && row.crews.length > 0
-      ? row.crews[0]?.name ?? null
-      : null;
+  const attRes = await supabase
+    .from("task_attachments")
+    .select("id, url, created_at")
+    .eq("task_id", taskId)
+    .order("created_at", { ascending: true });
 
-  // Osoba przypisana do zadania
-  let memberId: string | null = null;
+  if (attRes.error) {
+    console.error("fetchTask attachments error:", attRes.error);
+  }
+
+  const signedPhotos = await signTaskImageUrls(
+    (attRes.data ?? []).map((x: any) => ({ id: String(x.id), path: String(x.url) }))
+  );
+
+  // ✅ FIX: relacje one-to-many vs many-to-one – ujednolicamy (obiekt albo tablica)
+  const crewObj = normalizeRelOne<{ id: string; name: string | null }>((row as any).crews);
+  const crewName = crewObj?.name != null && String(crewObj.name).trim() ? String(crewObj.name) : null;
+
+  const memberObj = normalizeRelOne<{
+    id: string;
+    first_name: string | null;
+    last_name: string | null;
+    email: string | null;
+  }>((row as any).team_members);
+
   let memberLabel: string | null = null;
-
-  if (row.team_members && row.team_members.length > 0) {
-    const member = row.team_members[0];
-    memberId = member.id;
-    const f = (member.first_name as string | null) ?? "";
-    const l = (member.last_name as string | null) ?? "";
-    const e = (member.email as string | null) ?? "";
+  if (memberObj) {
+    const f = (memberObj.first_name ?? "").trim();
+    const l = (memberObj.last_name ?? "").trim();
+    const e = (memberObj.email ?? "").trim();
     const namePart = [f, l].filter(Boolean).join(" ");
     memberLabel = namePart || e || null;
   }
 
-  // Kto zlecił
   let createdByLabel: string | null = null;
   if (row.created_by) {
-    const { data: creator } = await supabase
+    const creatorRes = await supabase
       .from("v_account_members_overview")
       .select("first_name, last_name, email")
       .eq("user_id", row.created_by)
       .maybeSingle();
 
-    if (creator) {
-      const f = (creator as any).first_name as string | null;
-      const l = (creator as any).last_name as string | null;
-      const e = (creator as any).email as string | null;
-      if (f || l) {
-        createdByLabel = [f, l].filter(Boolean).join(" ");
-      } else if (e) {
-        createdByLabel = e;
-      }
+    if (creatorRes.error) {
+      console.error("creator lookup error:", creatorRes.error);
+    } else if (creatorRes.data) {
+      const f = ((creatorRes.data as any).first_name as string | null) ?? "";
+      const l = ((creatorRes.data as any).last_name as string | null) ?? "";
+      const e = ((creatorRes.data as any).email as string | null) ?? "";
+      createdByLabel = f || l ? [f, l].filter(Boolean).join(" ") : e || null;
     }
   }
-
-  const photos =
-    Array.isArray(row.photos)
-      ? row.photos.filter((p): p is string => typeof p === "string")
-      : [];
 
   const placeChain = await buildPlaceChain(row.place_id);
 
@@ -209,279 +238,448 @@ async function fetchTask(taskId: string): Promise<TaskDetails | null> {
     placeId: row.place_id,
     crewId: row.assigned_crew_id,
     crewName,
-    memberId,
+    memberId: row.assigned_member_id,
     memberLabel,
     createdByLabel,
-    photos,
+    photos: signedPhotos,
     placeChain,
   };
 }
 
-/* -------------------------------------------------------- */
-/*                Brygady / osoby do selecta                */
-/* -------------------------------------------------------- */
-
 async function fetchCrewOptions(): Promise<CrewOption[]> {
   const supabase = await supabaseServer();
+  const res = await supabase.from("crews").select("id, name").order("name", { ascending: true });
 
-  const { data, error } = await supabase
-    .from("crews")
-    .select("id, name")
-    .order("name", { ascending: true });
-
-  if (error) {
-    console.error("fetchCrewOptions error:", error);
+  if (res.error) {
+    console.error("fetchCrewOptions error:", res.error);
     return [];
   }
 
-  return (data as CrewOption[]) ?? [];
+  return (res.data ?? []).map((r: any) => ({
+    id: String(r.id),
+    name: String(r.name ?? ""),
+  }));
 }
 
 async function fetchMemberOptions(): Promise<MemberOption[]> {
   const supabase = await supabaseServer();
-
-  const { data, error } = await supabase
+  const res = await supabase
     .from("team_members")
     .select("id, first_name, last_name, email, status")
     .is("deleted_at", null)
     .eq("status", "active")
     .order("first_name", { ascending: true });
 
-  if (error) {
-    console.error("fetchMemberOptions error:", error);
+  if (res.error) {
+    console.error("fetchMemberOptions error:", res.error);
     return [];
   }
 
-  const rows = (data ?? []) as any[];
-
-  return rows.map((row) => {
+  return (res.data ?? []).map((row: any) => {
     const first = (row.first_name as string | null) ?? "";
     const last = (row.last_name as string | null) ?? "";
     const email = (row.email as string | null) ?? "";
-
     const namePart = [first, last].filter(Boolean).join(" ");
     const label = namePart || email || "Bez nazwy";
-
-    return {
-      id: String(row.id),
-      label,
-    };
+    return { id: String(row.id), label };
   });
 }
 
-/* -------------------------------------------------------- */
-/*                        PAGE JSX                          */
-/* -------------------------------------------------------- */
+/**
+ * worker/storeman: widzą tylko swoje zadania.
+ * -> sprawdzamy scope:
+ *    - assigned_member_id w team_members usera
+ *    - lub assigned_crew_id w crew_id usera
+ */
+async function canSeeTaskOwnScope(taskId: string, userId: string): Promise<boolean> {
+  const supabase = await supabaseServer();
+
+  const { data: tmRows, error: tmErr } = await supabase
+    .from("team_members")
+    .select("id, crew_id")
+    .eq("user_id", userId)
+    .is("deleted_at", null);
+
+  if (tmErr) {
+    console.error("canSeeTaskOwnScope team_members error:", tmErr);
+    return false;
+  }
+
+  const memberIds = (tmRows ?? [])
+    .map((x: any) => x.id as string | null)
+    .filter((x): x is string => !!x);
+
+  const crewIds = (tmRows ?? [])
+    .map((x: any) => x.crew_id as string | null)
+    .filter((x): x is string => !!x);
+
+  if (memberIds.length === 0 && crewIds.length === 0) return false;
+
+  if (memberIds.length > 0) {
+    const { data, error } = await supabase
+      .from("project_tasks")
+      .select("id")
+      .eq("id", taskId)
+      .in("assigned_member_id", memberIds)
+      .is("deleted_at", null)
+      .maybeSingle();
+
+    if (error) console.error("canSeeTaskOwnScope member check error:", error);
+    if (data?.id) return true;
+  }
+
+  if (crewIds.length > 0) {
+    const { data, error } = await supabase
+      .from("project_tasks")
+      .select("id")
+      .eq("id", taskId)
+      .in("assigned_crew_id", crewIds)
+      .is("deleted_at", null)
+      .maybeSingle();
+
+    if (error) console.error("canSeeTaskOwnScope crew check error:", error);
+    if (data?.id) return true;
+  }
+
+  return false;
+}
+
+function fmtWhen(iso: string | null | undefined) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString("pl-PL", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function getSp(sp: { [k: string]: string | string[] | undefined } | undefined, key: string) {
+  const v = sp?.[key];
+  return Array.isArray(v) ? v[0] : v;
+}
+
+function AutoHideToastScript({ id }: { id: string }) {
+  const js = `
+  (function(){
+    try {
+      var el = document.getElementById(${JSON.stringify(id)});
+      if (!el) return;
+      window.setTimeout(function(){
+        try {
+          el.style.transition = 'opacity 200ms ease';
+          el.style.opacity = '0';
+          window.setTimeout(function(){ el.remove(); }, 220);
+        } catch(e) {}
+      }, 5000);
+    } catch(e) {}
+  })();`;
+  // eslint-disable-next-line react/no-danger
+  return <script dangerouslySetInnerHTML={{ __html: js }} />;
+}
 
 type PageProps = {
   params: Promise<{ taskId: string }>;
+  searchParams?: Promise<{ [key: string]: string | string[] | undefined }>;
 };
 
-export default async function TaskDetailsPage({ params }: PageProps) {
+export default async function TaskDetailsPage({ params, searchParams }: PageProps) {
   const { taskId } = await params;
+  const spObj = searchParams ? await searchParams : undefined;
+
+  const supabase = await supabaseServer();
+  const [{ data: auth }, snapshot] = await Promise.all([
+    supabase.auth.getUser(),
+    fetchMyPermissionsSnapshot(),
+  ]);
+
+  const user = auth?.user ?? null;
+  if (!user) notFound();
+
+  const canReadAll = can(snapshot, PERM.TASKS_READ_ALL);
+  const canReadOwn = can(snapshot, PERM.TASKS_READ_OWN);
+  if (!canReadAll && !canReadOwn) notFound();
 
   const [task, crewOptions, memberOptions] = await Promise.all([
     fetchTask(taskId),
-    fetchCrewOptions(),
-    fetchMemberOptions(),
+    canReadAll ? fetchCrewOptions() : Promise.resolve([]),
+    canReadAll ? fetchMemberOptions() : Promise.resolve([]),
   ]);
 
-  if (!task) {
-    notFound();
+  if (!task) notFound();
+
+  if (!canReadAll) {
+    const allowed = await canSeeTaskOwnScope(taskId, user.id);
+    if (!allowed) notFound();
   }
 
+  const canManage = can(snapshot, PERM.TASKS_UPDATE_ALL) || can(snapshot, PERM.TASKS_ASSIGN);
+  const canDelete = can(snapshot, PERM.TASKS_UPDATE_ALL);
+  const canUploadPhotos = can(snapshot, PERM.TASKS_UPLOAD_PHOTOS);
+  const canDeletePhoto = can(snapshot, PERM.TASKS_UPDATE_ALL);
+
+  const saved = getSp(spObj, "saved") === "1";
+
+  async function saveTask(formData: FormData) {
+    "use server";
+    await updateTaskManager(formData);
+    const id = String(formData.get("task_id") ?? "");
+    redirect(`/tasks/${id}?saved=1`);
+  }
+
+  async function deleteTask(formData: FormData) {
+    "use server";
+    await softDeleteTask(formData);
+    redirect(`/tasks?deleted=1`);
+  }
+
+  const assignedMemberText = task.memberLabel ?? "— brak osoby —";
+  const assignedCrewText = task.crewName ?? "— brak brygady —";
+
   return (
-    <RoleGuard
-      allow={["owner", "manager", "storeman", "worker"]}
-      fallback={<div className="text-sm text-foreground/70">Brak dostępu.</div>}
-    >
-      <div className="space-y-6">
-        {/* Ścieżka lokalizacji */}
-        <div className="text-xs text-foreground/60">
-          Lokalizacja:{" "}
+    <div className="p-6 space-y-6">
+      {/* Back w prawym górnym rogu */}
+      <div className="flex items-center justify-end">
+        <BackButton className="inline-flex border border-border rounded px-3 py-2 bg-card hover:bg-card/80 text-sm" />
+      </div>
+
+      {/* ✅ Lokalizacja bardziej wyrazna */}
+      <div className="border border-border rounded-xl bg-card p-4">
+        <div className="text-[11px] text-foreground/60 mb-2">Lokalizacja</div>
+        <div className="flex flex-wrap gap-2">
           {task.placeChain.map((p, idx) => (
-            <span key={p.id}>
+            <span key={p.id} className="inline-flex items-center gap-2">
               <Link
                 href={`/object/${p.id}`}
-                className="hover:underline text-foreground/80"
+                className="inline-flex items-center rounded-full border border-border bg-background/40 px-3 py-1.5 text-xs font-semibold text-foreground/85 hover:bg-foreground/5 transition"
               >
-                {p.name}
+                {p.name || "—"}
               </Link>
-              {idx < task.placeChain.length - 1 && " / "}
+              {idx < task.placeChain.length - 1 ? (
+                <span className="text-foreground/30 text-xs">→</span>
+              ) : null}
             </span>
           ))}
         </div>
+      </div>
 
-        {/* Nagłówek */}
-        <div className="flex items-start justify-between">
-          <div>
-            <h1 className="text-xl font-semibold">{task.title}</h1>
+      {/* GÓRA: tytuł + status + przypisanie */}
+      <div className="space-y-3">
+        <div className="flex items-start justify-between gap-6">
+          <div className="min-w-0">
+            <h1 className="text-xl font-semibold break-words">{task.title}</h1>
 
-            {task.memberLabel && (
-              <p className="text-xs text-foreground/70">
-                Osoba: <strong>{task.memberLabel}</strong>
-              </p>
-            )}
+            {/* ✅ wyraźnie pokazane przypisanie */}
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="text-[11px] text-foreground/60">Przypisane do:</span>
 
-            {task.crewName && (
-              <p className="text-xs text-foreground/70">
-                Brygada: <strong>{task.crewName}</strong>
-              </p>
-            )}
+              {task.memberId ? (
+                <span className="inline-flex items-center rounded-full border border-border bg-foreground/10 px-3 py-1 text-[11px] font-semibold text-foreground">
+                  Osoba: {assignedMemberText}
+                </span>
+              ) : (
+                <span className="inline-flex items-center rounded-full border border-border bg-background/40 px-3 py-1 text-[11px] text-foreground/70">
+                  Osoba: —
+                </span>
+              )}
 
-            {task.createdByLabel && (
-              <p className="text-xs text-foreground/70">
-                Zlecił: <strong>{task.createdByLabel}</strong>
-              </p>
-            )}
+              {task.crewId ? (
+                <span className="inline-flex items-center rounded-full border border-border bg-foreground/10 px-3 py-1 text-[11px] font-semibold text-foreground">
+                  Brygada: {assignedCrewText}
+                </span>
+              ) : (
+                <span className="inline-flex items-center rounded-full border border-border bg-background/40 px-3 py-1 text-[11px] text-foreground/70">
+                  Brygada: —
+                </span>
+              )}
+            </div>
           </div>
 
-          <div className="flex flex-col items-end">
+          <div className="flex flex-col items-end gap-2">
             <TaskStatusBadge status={task.status} />
-            <Link
-              href="/tasks"
-              className="text-[11px] mt-1 text-foreground/60 hover:underline"
-            >
-              &larr; Moje zadania
-            </Link>
           </div>
         </div>
 
-        {/* Opis */}
-        <section>
-          <h2 className="text-sm font-semibold text-foreground/80">Opis</h2>
-          {task.description ? (
-            <p className="text-sm whitespace-pre-line">{task.description}</p>
-          ) : (
-            <p className="text-sm text-foreground/60">Brak opisu.</p>
-          )}
-        </section>
+        {/* Zdjęcia (zawsze podgląd) */}
+        <TaskPhotosLightbox
+          photos={task.photos}
+          taskId={task.id}
+          deleteAction={canDeletePhoto ? deleteTaskPhoto : undefined}
+        />
 
-        {/* Zdjęcia */}
-        <section>
-          <h2 className="text-sm font-semibold text-foreground/80">Zdjęcia</h2>
-          <TaskPhotosLightbox
-            photos={task.photos}
-            taskId={task.id}
-            deleteAction={deleteTaskPhoto}
-          />
-        </section>
-
-        {/* Panel menedżera */}
-        <RoleGuard allow={["owner", "manager"]}>
-          <section className="border-t border-border/60 pt-4 space-y-4">
-            <h2 className="text-sm font-semibold text-foreground/80">
-              Panel menedżera
-            </h2>
-
-            <form action={updateTaskManager} className="space-y-3 max-w-md">
-              <input type="hidden" name="task_id" value={task.id} />
-
-              {/* Tytuł */}
-              <div>
-                <label className="block text-[11px] text-foreground/70">
-                  Tytuł
-                </label>
-                <input
-                  name="title"
-                  defaultValue={task.title}
-                  className="w-full bg-background border border-border rounded px-2 py-1 text-xs"
-                />
-              </div>
-
-              {/* Opis */}
-              <div>
-                <label className="block text-[11px] text-foreground/70">
-                  Opis
-                </label>
-                <textarea
-                  name="description"
-                  rows={3}
-                  defaultValue={task.description ?? ""}
-                  className="w-full bg-background border border-border rounded px-2 py-1 text-xs resize-none"
-                />
-              </div>
-
-              {/* Status */}
-              <div>
-                <label className="block text-[11px] text-foreground/70">
-                  Status
-                </label>
-                <select
-                  name="status"
-                  defaultValue={task.status}
-                  className="w-full bg-background border border-border rounded px-2 py-1 text-xs"
-                >
-                  <option value="todo">Do zrobienia</option>
-                  <option value="in_progress">W trakcie</option>
-                  <option value="done">Zrobione</option>
-                </select>
-              </div>
-
-              {/* Brygada */}
-              <div>
-                <label className="block text-[11px] text-foreground/70">
-                  Przypisana brygada
-                </label>
-                <select
-                  name="assigned_crew_id"
-                  defaultValue={task.crewId ?? ""}
-                  className="w-full bg-background border border-border rounded px-2 py-1 text-xs"
-                >
-                  <option value="">— brak przypisania —</option>
-                  {crewOptions.map((crew) => (
-                    <option key={crew.id} value={crew.id}>
-                      {crew.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Osoba */}
-              <div>
-                <label className="block text-[11px] text-foreground/70">
-                  Przypisana osoba
-                </label>
-                <select
-                  name="assigned_member_id"
-                  defaultValue={task.memberId ?? ""}
-                  className="w-full bg-background border border-border rounded px-2 py-1 text-xs"
-                >
-                  <option value="">— brak przypisania —</option>
-                  {memberOptions.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <button className="bg-foreground text-background rounded px-3 py-1.5 text-xs font-semibold hover:bg-foreground/90">
-                Zapisz zmiany
-              </button>
-            </form>
-
-            {/* Soft delete zadania */}
-            <form action={softDeleteTask} className="max-w-md">
-              <input type="hidden" name="task_id" value={task.id} />
-              <button
-                type="submit"
-                className="mt-2 w-full border border-red-500/70 text-red-400 rounded px-3 py-1.5 text-xs font-semibold hover:bg-red-500/10"
-              >
-                Usuń zadanie (soft delete)
-              </button>
-            </form>
-
-            {/* Osobny uploader zdjęć */}
-            <div className="max-w-md">
-              <TaskPhotosUploader
-                taskId={task.id}
-                existingCount={task.photos.length}
-              />
+        {/* Uploader ukryty dopóki nie klikniesz */}
+        {canManage && canUploadPhotos && (
+          <details className="group max-w-md border border-border/60 rounded-xl bg-card/40 overflow-hidden">
+            <summary className="cursor-pointer select-none px-4 py-3 text-xs font-semibold text-foreground/80 hover:bg-card/60 transition">
+              Dodaj zdjęcie{" "}
+              <span className="ml-2 text-[10px] font-normal text-foreground/60">(max 3 łącznie)</span>
+            </summary>
+            <div className="p-4">
+              <TaskPhotosUploader taskId={task.id} existingCount={task.photos.length} />
             </div>
-          </section>
-        </RoleGuard>
+          </details>
+        )}
       </div>
-    </RoleGuard>
+
+      {/* STAŁE INFO */}
+      <div className="grid gap-3 sm:grid-cols-3">
+        <div className="border border-border rounded-xl bg-card p-4">
+          <div className="text-[11px] text-foreground/60">Kto zlecił</div>
+          <div className="text-sm font-semibold">{task.createdByLabel ?? "—"}</div>
+        </div>
+
+        <div className="border border-border rounded-xl bg-card p-4">
+          <div className="text-[11px] text-foreground/60">Kiedy</div>
+          <div className="text-sm font-semibold">{fmtWhen(task.createdAt)}</div>
+        </div>
+
+        <div className="border border-border rounded-xl bg-card p-4">
+          <div className="text-[11px] text-foreground/60">Status</div>
+          <div className="text-sm font-semibold">{task.status}</div>
+        </div>
+      </div>
+
+      {/* EDYCJA */}
+      <form action={saveTask} className="space-y-4">
+        <input type="hidden" name="task_id" value={task.id} />
+        {/* zachowujemy status (updateTaskManager może oczekiwać) */}
+        <input type="hidden" name="status" value={task.status} />
+
+        <div className="border border-border rounded-xl bg-card p-4 space-y-2">
+          <div className="text-[11px] text-foreground/60">Tytuł</div>
+          {canManage ? (
+            <input
+              name="title"
+              defaultValue={task.title}
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-foreground/40 hover:bg-foreground/5 transition"
+            />
+          ) : (
+            <div className="text-sm font-semibold text-foreground/90">{task.title}</div>
+          )}
+        </div>
+
+        <div className="border border-border rounded-xl bg-card p-4 space-y-2">
+          <div className="text-[11px] text-foreground/60">Opis</div>
+          {canManage ? (
+            <textarea
+              name="description"
+              rows={5}
+              defaultValue={task.description ?? ""}
+              placeholder="opis…"
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm resize-none outline-none focus:ring-1 focus:ring-foreground/40 hover:bg-foreground/5 transition"
+            />
+          ) : task.description ? (
+            <div className="text-sm whitespace-pre-line">{task.description}</div>
+          ) : (
+            <div className="text-sm text-foreground/60">Brak opisu.</div>
+          )}
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="border border-border rounded-xl bg-card p-4 space-y-2">
+            <div className="text-[11px] text-foreground/60">Osoba</div>
+
+            {!canManage ? (
+              <div className="text-sm font-semibold">{assignedMemberText}</div>
+            ) : (
+              <details className="group border border-border/60 rounded-lg bg-background/30">
+                <summary className="cursor-pointer select-none px-3 py-2 text-sm font-semibold hover:bg-foreground/5 rounded-lg transition">
+                  {assignedMemberText}
+                </summary>
+                <div className="p-3 pt-2 space-y-2">
+                  <select
+                    name="assigned_member_id"
+                    defaultValue={task.memberId ?? ""}
+                    className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-foreground/40 hover:bg-foreground/5 transition"
+                  >
+                    <option value="">— brak przypisania —</option>
+                    {memberOptions.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </details>
+            )}
+          </div>
+
+          <div className="border border-border rounded-xl bg-card p-4 space-y-2">
+            <div className="text-[11px] text-foreground/60">Brygada</div>
+
+            {!canManage ? (
+              <div className="text-sm font-semibold">{assignedCrewText}</div>
+            ) : (
+              <details className="group border border-border/60 rounded-lg bg-background/30">
+                <summary className="cursor-pointer select-none px-3 py-2 text-sm font-semibold hover:bg-foreground/5 rounded-lg transition">
+                  {assignedCrewText}
+                </summary>
+                <div className="p-3 pt-2 space-y-2">
+                  <select
+                    name="assigned_crew_id"
+                    defaultValue={task.crewId ?? ""}
+                    className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-foreground/40 hover:bg-foreground/5 transition"
+                  >
+                    <option value="">— brak przypisania —</option>
+                    {crewOptions.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </details>
+            )}
+          </div>
+        </div>
+
+        {/* ✅ STICKY BAR z przyciskami i toastem obok (zawsze widoczny, na dole ekranu) */}
+        {canManage && (
+          <div className="sticky bottom-4 z-10">
+            <div className="mx-auto max-w-4xl rounded-2xl border border-border/60 bg-card/80 backdrop-blur px-4 py-3 shadow-sm">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                  <button
+                    className="inline-flex items-center justify-center rounded-full bg-foreground text-background px-6 py-2 text-xs font-semibold hover:bg-foreground/90 transition"
+                    type="submit"
+                  >
+                    Zapisz
+                  </button>
+
+                  {canDelete && (
+                    <button
+                      formAction={deleteTask}
+                      type="submit"
+                      className="inline-flex w-full sm:w-auto items-center justify-center rounded-full border border-red-500/70 text-red-400 px-6 py-2 text-xs font-semibold hover:bg-red-500/10 transition"
+                    >
+                      Usuń
+                    </button>
+                  )}
+                </div>
+
+                {/* ✅ Toast obok przycisków (widoczny zawsze, autohide 5s) */}
+                {saved ? (
+                  <div
+                    id="taskSavedToast"
+                    className="inline-flex items-center gap-2 rounded-full border border-border bg-background/40 px-4 py-2 text-xs text-foreground/80"
+                  >
+                    <span className="text-emerald-400">✅</span>
+                    Zmiany zostały zapisane.
+                    <AutoHideToastScript id="taskSavedToast" />
+                  </div>
+                ) : (
+                  <div className="hidden sm:block text-[11px] text-foreground/45">
+                    {/* puste miejsce, żeby układ nie skakał */}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </form>
+    </div>
   );
 }

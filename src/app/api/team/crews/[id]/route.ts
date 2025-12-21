@@ -1,45 +1,46 @@
 // src/app/api/team/crews/[id]/route.ts
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import { supabaseServer } from "@/lib/supabaseServer";
 
 type RouteContext = {
   params: { id: string };
 };
 
-export async function DELETE(_req: Request, { params }: RouteContext) {
-  // ⬅⬅ TU BYŁ PROBLEM – brak await
-  const supabase = await supabaseServer();
-  const crewId = params.id;
+const ParamsSchema = z.object({
+  id: z.string().uuid(),
+});
 
-  if (!crewId) {
+export async function DELETE(_req: Request, { params }: RouteContext) {
+  const parsedParams = ParamsSchema.safeParse(params);
+  if (!parsedParams.success) {
     return NextResponse.json(
-      { error: "Brak identyfikatora brygady." },
+      { error: "Nieprawidłowy identyfikator brygady." },
       { status: 400 }
     );
   }
 
-  // Teraz cała logika idzie przez RPC:
-  //  - sprawdzenie uprawnień (role_in_account in ('owner','manager'))
-  //  - weryfikacja, czy brygada należy do current_account_id()
-  //  - odpięcie członków (crew_id = null, updated_at = now())
-  //  - usunięcie brygady z public.crews
-  const { error } = await supabase.rpc("delete_crew", {
-    p_crew_id: crewId,
-  });
+  const supabase = await supabaseServer();
+  const crewId = parsedParams.data.id;
+
+  const { error } = await supabase.rpc("delete_crew", { p_crew_id: crewId });
 
   if (error) {
     console.error("delete_crew RPC error", error);
 
-    const msg = error.message || "Nie udało się usunąć brygady.";
-    const status = msg.toLowerCase().includes("permission denied") ? 403 : 400;
+    const msg = (error.message || "Nie udało się usunąć brygady.").toLowerCase();
 
-    return NextResponse.json({ error: msg }, { status });
+    // Najczęstsze przypadki:
+    // - permission / not allowed -> 403
+    // - not found / does not exist -> 404
+    // - conflict (np. constraint) -> 409
+    let status = 400;
+    if (msg.includes("permission") || msg.includes("not allowed") || msg.includes("denied")) status = 403;
+    else if (msg.includes("not found") || msg.includes("does not exist") || msg.includes("brak") || msg.includes("nie istnieje")) status = 404;
+    else if (msg.includes("conflict") || msg.includes("constraint") || msg.includes("still")) status = 409;
+
+    return NextResponse.json({ error: error.message || "Błąd RPC" }, { status });
   }
 
-  return NextResponse.json({ ok: true });
-}
-
-// Dla wygody – jeśli gdzieś użyjesz POST zamiast DELETE
-export async function POST(req: Request, ctx: RouteContext) {
-  return DELETE(req, ctx);
+  return NextResponse.json({ ok: true }, { status: 200 });
 }

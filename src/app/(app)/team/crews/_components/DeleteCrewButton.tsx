@@ -6,9 +6,17 @@ import { useTransition, useState } from "react";
 type Props = {
   crewId: string;
   crewName: string;
+  canManage?: boolean; // ✅ dodane
 };
 
-export default function DeleteCrewButton({ crewId, crewName }: Props) {
+export default function DeleteCrewButton({
+  crewId,
+  crewName,
+  canManage = false,
+}: Props) {
+  // ✅ worker/storeman nie widzą nic
+  if (!canManage) return null;
+
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -32,12 +40,11 @@ export default function DeleteCrewButton({ crewId, crewName }: Props) {
         return;
       }
 
-      // redirect + refresh
       startTransition(() => {
         router.push("/team/crews");
         router.refresh();
       });
-    } catch (e: any) {
+    } catch {
       setError("Nieoczekiwany błąd sieci.");
     }
   }

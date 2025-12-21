@@ -26,10 +26,8 @@ export async function POST(req: NextRequest) {
 
     const { crew_id, member_id } = parsed.data;
 
-    // ⬅⬅⬅ TUTAJ DODAJEMY await
     const supabase = await supabaseServer();
 
-    // change_crew_leader RPC
     const { error } = await supabase.rpc("change_crew_leader", {
       p_crew_id: crew_id,
       p_member_id: member_id,
@@ -41,19 +39,24 @@ export async function POST(req: NextRequest) {
       const message =
         error.message ?? "Nie udało się ustawić nowego lidera brygady.";
 
+      const msgLower = message.toLowerCase();
+      const status =
+        msgLower.includes("permission") ||
+        msgLower.includes("denied") ||
+        msgLower.includes("not allowed")
+          ? 403
+          : 400;
+
       return NextResponse.json(
         {
           error: "change_leader_failed",
           message,
         },
-        { status: 400 }
+        { status }
       );
     }
 
-    return NextResponse.json(
-      { ok: true },
-      { status: 200 }
-    );
+    return NextResponse.json({ ok: true }, { status: 200 });
   } catch (err: any) {
     console.error("[POST /api/team/crews/change-leader] Unhandled error:", err);
 

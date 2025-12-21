@@ -26,13 +26,8 @@ export async function POST(req: NextRequest) {
 
     const { member_id, crew_id } = parsed.data;
 
-    // ⬅⬅ TU DODAJEMY await
     const supabase = await supabaseServer();
 
-    // assign_member_to_crew:
-    // - sprawdza role_in_account() in ('owner','manager')
-    // - waliduje, że member i crew należą do current_account_id()
-    // - update team_members.set(crew_id = p_crew_id)
     const { error } = await supabase.rpc("assign_member_to_crew", {
       p_member_id: member_id,
       p_crew_id: crew_id,
@@ -44,19 +39,24 @@ export async function POST(req: NextRequest) {
       const message =
         error.message ?? "Nie udało się przypisać członka do brygady.";
 
+      const msgLower = message.toLowerCase();
+      const status =
+        msgLower.includes("permission") ||
+        msgLower.includes("denied") ||
+        msgLower.includes("not allowed")
+          ? 403
+          : 400;
+
       return NextResponse.json(
         {
           error: "assign_failed",
           message,
         },
-        { status: 400 }
+        { status }
       );
     }
 
-    return NextResponse.json(
-      { ok: true },
-      { status: 200 }
-    );
+    return NextResponse.json({ ok: true }, { status: 200 });
   } catch (err: any) {
     console.error("[POST /api/team/crews/assign] Unhandled error:", err);
 

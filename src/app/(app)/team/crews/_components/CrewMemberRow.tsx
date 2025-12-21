@@ -17,9 +17,15 @@ type CrewMemberRowProps = {
   member: CrewMember;
   crew: VCrewsOverview;
   otherCrews: Pick<VCrewsOverview, "id" | "name">[];
+  canManage?: boolean; // ✅ foreman/manager/owner
 };
 
-export function CrewMemberRow({ member, crew, otherCrews }: CrewMemberRowProps) {
+export function CrewMemberRow({
+  member,
+  crew,
+  otherCrews,
+  canManage = false,
+}: CrewMemberRowProps) {
   const router = useRouter();
   const supabase = supabaseBrowser();
 
@@ -27,10 +33,11 @@ export function CrewMemberRow({ member, crew, otherCrews }: CrewMemberRowProps) 
   const [movingTo, setMovingTo] = useState<string>("");
 
   const isLeader =
-    crew.leader_member_id !== null &&
-    crew.leader_member_id === member.id;
+    crew.leader_member_id !== null && crew.leader_member_id === member.id;
 
   async function handleUnassign() {
+    if (!canManage) return;
+
     startTransition(async () => {
       const { error } = await supabase.rpc("assign_member_to_crew", {
         p_member_id: member.id,
@@ -39,7 +46,6 @@ export function CrewMemberRow({ member, crew, otherCrews }: CrewMemberRowProps) 
 
       if (error) {
         console.error("assign_member_to_crew (unassign) error", error);
-        // w MVP tylko log – można tu kiedyś dorzucić toast
       }
 
       router.refresh();
@@ -48,6 +54,7 @@ export function CrewMemberRow({ member, crew, otherCrews }: CrewMemberRowProps) 
 
   async function handleMove(e: React.FormEvent) {
     e.preventDefault();
+    if (!canManage) return;
     if (!movingTo) return;
 
     startTransition(async () => {
@@ -60,7 +67,6 @@ export function CrewMemberRow({ member, crew, otherCrews }: CrewMemberRowProps) 
         console.error("assign_member_to_crew (move) error", error);
       }
 
-      // czyścimy select i odświeżamy widok
       setMovingTo("");
       router.refresh();
     });
@@ -85,45 +91,43 @@ export function CrewMemberRow({ member, crew, otherCrews }: CrewMemberRowProps) 
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 md:justify-end">
-        {/* Usuń z brygady (wolny strzelec) */}
-        <button
-          type="button"
-          onClick={handleUnassign}
-          disabled={isPending}
-          className="rounded-xl border border-border/70 bg-background px-2.5 py-1 text-[11px] text-muted-foreground hover:bg-muted/60 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {isPending ? "Przetwarzanie…" : "Usuń z brygady"}
-        </button>
-
-        {/* Szybkie przeniesienie do innej brygady */}
-        {otherCrews.length > 0 && (
-          <form
-            onSubmit={handleMove}
-            className="flex items-center gap-1"
+      {/* ✅ Worker/storeman: żadnych akcji */}
+      {canManage && (
+        <div className="flex flex-wrap items-center gap-2 md:justify-end">
+          <button
+            type="button"
+            onClick={handleUnassign}
+            disabled={isPending}
+            className="rounded-xl border border-border/70 bg-background px-2.5 py-1 text-[11px] text-muted-foreground hover:bg-muted/60 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            <select
-              value={movingTo}
-              onChange={(e) => setMovingTo(e.target.value)}
-              className="max-w-[160px] rounded-xl border border-border/70 bg-background px-2 py-1 text-[11px]"
-            >
-              <option value="">Przenieś do…</option>
-              {otherCrews.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-            <button
-              type="submit"
-              disabled={isPending || !movingTo}
-              className="rounded-xl bg-muted px-2 py-1 text-[11px] text-foreground hover:bg-muted/80 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              OK
-            </button>
-          </form>
-        )}
-      </div>
+            {isPending ? "Przetwarzanie…" : "Usuń z brygady"}
+          </button>
+
+          {otherCrews.length > 0 && (
+            <form onSubmit={handleMove} className="flex items-center gap-1">
+              <select
+                value={movingTo}
+                onChange={(e) => setMovingTo(e.target.value)}
+                className="max-w-[160px] rounded-xl border border-border/70 bg-background px-2 py-1 text-[11px]"
+              >
+                <option value="">Przenieś do…</option>
+                {otherCrews.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="submit"
+                disabled={isPending || !movingTo}
+                className="rounded-xl bg-muted px-2 py-1 text-[11px] text-foreground hover:bg-muted/80 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                OK
+              </button>
+            </form>
+          )}
+        </div>
+      )}
     </li>
   );
 }

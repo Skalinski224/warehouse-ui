@@ -1,6 +1,9 @@
 // src/components/reports/stage/TaskPhotosGallery.tsx
 "use client";
 
+import { PERM, can } from "@/lib/permissions";
+import { usePermissionSnapshot } from "@/lib/RoleContext";
+
 export type TaskPhoto = {
   id: string;
   url: string;
@@ -13,6 +16,20 @@ type TaskPhotosGalleryProps = {
 };
 
 export default function TaskPhotosGallery({ photos }: TaskPhotosGalleryProps) {
+  const snapshot = usePermissionSnapshot();
+
+  // Najbezpieczniej: zdjęcia tylko dla tych, co mają uprawnienie foto (upload).
+  // Jeśli chcesz luźniej: zmienimy na tasks.read.own/all.
+  const canSeePhotos = can(snapshot, PERM.TASKS_UPLOAD_PHOTOS);
+
+  if (!canSeePhotos) {
+    return (
+      <div className="text-sm text-foreground/60">
+        Brak dostępu do zdjęć z realizacji.
+      </div>
+    );
+  }
+
   if (!photos.length) {
     return (
       <div className="text-sm text-foreground/60">

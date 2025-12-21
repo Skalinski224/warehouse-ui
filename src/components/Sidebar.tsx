@@ -3,166 +3,227 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useAccountRole } from "@/lib/RoleContext";
+import { usePermissionSnapshot } from "@/lib/RoleContext";
+import { PERM, can, type PermissionKey } from "@/lib/permissions";
 
-/**
- * Definicje sekcji oraz ich widoczności zależnie od roli.
- *
- * owner → korzysta z MENU.MANAGER (pełny dostęp)
- * manager → pełny dostęp (magazyn, operacje, projekt)
- * storeman → magazyn, operacje, zespół, moje zadania
- * worker → katalog, dzienne zużycie, zespół, moje zadania
- */
-const MENU = {
-  MANAGER: [
-    {
-      title: "Magazyn",
-      items: [
-        { href: "/", label: "Dashboard" },
-        { href: "/low-stock", label: "Co się kończy" },
-        { href: "/materials", label: "Katalog materiałów" },
-      ],
-    },
-    {
-      title: "Operacje",
-      items: [
-        { href: "/daily-reports", label: "Dzienne zużycie" },
-        { href: "/deliveries", label: "Nowe dostawy" },
-        { href: "/reports", label: "Raporty" },
-      ],
-    },
-    {
-      title: "Projekt",
-      items: [
-        { href: "/team", label: "Zespół" },
-        { href: "/object", label: "Obiekt" },          // tylko owner/manager
-        { href: "/tasks", label: "Moje zadania" },     // widok zadań brygady
-      ],
-    },
-  ],
-
-  STOREMAN: [
-    {
-      title: "Magazyn",
-      items: [
-        { href: "/", label: "Dashboard" },
-        { href: "/low-stock", label: "Co się kończy" },
-        { href: "/materials", label: "Katalog materiałów" },
-      ],
-    },
-    {
-      title: "Operacje",
-      items: [
-        { href: "/daily-reports", label: "Dzienne zużycie" },
-        { href: "/deliveries", label: "Nowe dostawy" },
-        { href: "/reports", label: "Raporty" }, // podstawowe raporty
-      ],
-    },
-    {
-      title: "Projekt",
-      items: [
-        { href: "/team", label: "Zespół" },
-        { href: "/tasks", label: "Moje zadania" },
-      ],
-    },
-  ],
-
-  WORKER: [
-    {
-      title: "Magazyn",
-      items: [{ href: "/materials", label: "Katalog materiałów" }],
-    },
-    {
-      title: "Operacje",
-      items: [
-        { href: "/daily-reports", label: "Dzienne zużycie" },
-        { href: "/tasks", label: "Moje zadania" },
-      ],
-    },
-    {
-      title: "Projekt",
-      items: [{ href: "/team", label: "Zespół" }],
-    },
-  ],
+type NavItem = {
+  href: string;
+  label: string;
+  perm: PermissionKey;
 };
+
+type Section = {
+  title?: string;
+  items: NavItem[];
+};
+
+const APP_NAME = "Warehouse UI"; // <- tu ustaw nazwę aplikacji (zamiast "Dashboard")
+
+// 🔥 kanoniczna lista (kolejność wg Twoich wytycznych)
+const ALL_ITEMS: {
+  home: NavItem;
+  myTasks: NavItem;
+  analytics: NavItem;
+  lowStock: NavItem;
+  reports: NavItem;
+  materials: NavItem;
+  deliveries: NavItem;
+  inventory: NavItem;
+  dailyReports: NavItem;
+  object: NavItem;
+  team: NavItem;
+} = {
+  home: { href: "/", label: APP_NAME, perm: PERM.METRICS_READ }, // perm tylko jako “gating minimalny” (poniżej i tak przepuszczamy owner/manager)
+  myTasks: { href: "/tasks", label: "Moje zadania", perm: PERM.TASKS_READ_OWN },
+  analytics: { href: "/analyze/metrics", label: "Analizy", perm: PERM.METRICS_READ },
+  lowStock: { href: "/low-stock", label: "Co się kończy", perm: PERM.LOW_STOCK_READ },
+  reports: { href: "/reports", label: "Raporty", perm: PERM.REPORTS_ITEMS_READ },
+
+  materials: { href: "/materials", label: "Katalog materiałów", perm: PERM.MATERIALS_READ },
+  deliveries: { href: "/deliveries", label: "Dostawy", perm: PERM.DELIVERIES_READ },
+  inventory: { href: "/inventory", label: "Inwentaryzacja", perm: PERM.INVENTORY_READ },
+  dailyReports: { href: "/daily-reports", label: "Dzienne zużycie", perm: PERM.DAILY_REPORTS_READ },
+
+  object: { href: "/object", label: "Obiekt i struktura", perm: PERM.PROJECT_MANAGE },
+  team: { href: "/team", label: "Zespół", perm: PERM.TEAM_READ },
+};
+
+// 🧠 polityka “co kto widzi” wg roli (UI), a finalnie i tak `can(snapshot, perm)`
+function roleSections(role: string | null): Section[] {
+  const r = (role ?? "").toLowerCase();
+
+  // worker: jedna lista, bez sekcji
+  if (r === "worker") {
+    return [
+      {
+        items: [
+          ALL_ITEMS.materials,
+          ALL_ITEMS.dailyReports,
+          ALL_ITEMS.myTasks,
+          ALL_ITEMS.team,
+        ],
+      },
+    ];
+  }
+
+  // foreman
+  if (r === "foreman") {
+    return [
+      {
+        title: "NAWIGACJA",
+        items: [
+          ALL_ITEMS.myTasks,
+          ALL_ITEMS.analytics,
+          ALL_ITEMS.lowStock,
+          ALL_ITEMS.reports,
+        ],
+      },
+      {
+        title: "MAGAZYN",
+        items: [ALL_ITEMS.materials, ALL_ITEMS.dailyReports],
+      },
+      {
+        title: "PROJEKT",
+        items: [ALL_ITEMS.object, ALL_ITEMS.team],
+      },
+    ];
+  }
+
+  // storeman
+  if (r === "storeman") {
+    return [
+      {
+        title: "NAWIGACJA",
+        items: [
+          ALL_ITEMS.myTasks,
+          ALL_ITEMS.analytics,
+          ALL_ITEMS.lowStock,
+          ALL_ITEMS.reports,
+        ],
+      },
+      {
+        title: "MAGAZYN",
+        items: [
+          ALL_ITEMS.materials,
+          ALL_ITEMS.deliveries,
+          ALL_ITEMS.inventory,
+          ALL_ITEMS.dailyReports,
+        ],
+      },
+      {
+        title: "PROJEKT",
+        items: [ALL_ITEMS.team],
+      },
+    ];
+  }
+
+  // manager / owner (i reszta) – pełny dostęp
+  return [
+    {
+      title: "NAWIGACJA",
+      items: [
+        ALL_ITEMS.myTasks,
+        ALL_ITEMS.analytics,
+        ALL_ITEMS.lowStock,
+        ALL_ITEMS.reports,
+      ],
+    },
+    {
+      title: "MAGAZYN",
+      items: [
+        ALL_ITEMS.materials,
+        ALL_ITEMS.deliveries,
+        ALL_ITEMS.inventory,
+        ALL_ITEMS.dailyReports,
+      ],
+    },
+    {
+      title: "PROJEKT",
+      items: [ALL_ITEMS.object, ALL_ITEMS.team],
+    },
+  ];
+}
+
+function isActive(pathname: string, href: string) {
+  if (href === "/") return pathname === "/";
+  return pathname === href || pathname.startsWith(href + "/");
+}
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const role = useAccountRole();
+  const snapshot = usePermissionSnapshot();
 
-  // Brak roli → nic nie pokazujemy, user nie powinien być w app
-  if (!role) return null;
+  if (!snapshot) return null;
 
-  // Przypisanie zestawu menu do roli
-  const sections =
-    role === "manager" || role === "owner"
-      ? MENU.MANAGER
-      : role === "storeman"
-      ? MENU.STOREMAN
-      : MENU.WORKER;
+  const sections = roleSections(snapshot.role ?? null);
+
+  // top link zawsze widoczny dla zalogowanego (to tylko UX), a uprawnienia i tak blokują strony
+  const topActive = isActive(pathname, "/");
 
   return (
-    <nav className="p-3 space-y-5">
-      {/* Brand */}
-      <div className="px-3 py-2 text-sm font-semibold opacity-80">
-        Warehouse UI
-      </div>
+    <nav className="p-3 space-y-4">
+      {/* Top brand / home */}
+      <Link
+        href="/"
+        className={[
+          "block px-3 py-2 rounded-2xl border transition",
+          topActive
+            ? "bg-background border-border text-foreground"
+            : "bg-background/20 border-border/60 text-foreground/85 hover:bg-background/35",
+        ].join(" ")}
+      >
+        <div className="text-sm font-semibold tracking-tight">{APP_NAME}</div>
+        <div className="text-[11px] text-foreground/55">Panel aplikacji</div>
+      </Link>
 
-      {sections.map((section, si) => (
-        <div key={section.title} className="space-y-2">
-          {/* Nagłówek sekcji */}
-          <div
-            className={[
-              "px-3 py-1.5 text-[11px] font-semibold tracking-wider uppercase",
-              "text-foreground/70",
-              "border-y border-border/50 bg-background/40 rounded-md",
-            ].join(" ")}
-          >
-            {section.title}
-          </div>
+      {/* Sections */}
+      {sections.map((section, idx) => {
+        const visible = section.items.filter((i) => can(snapshot, i.perm));
+        if (visible.length === 0) return null;
 
-          <ul className="space-y-1">
-            {section.items.map((it) => {
-              const active =
-                pathname === it.href ||
-                (it.href !== "/" && pathname?.startsWith(it.href + "/"));
+        const showTitle = Boolean(section.title);
 
-              return (
-                <li key={it.href}>
-                  <Link
-                    href={it.href}
-                    aria-current={active ? "page" : undefined}
-                    className={[
-                      "group block px-3 py-2 rounded-xl text-sm transition",
-                      active
-                        ? "bg-background text-foreground border border-border shadow-sm"
-                        : "text-foreground/70 hover:text-foreground hover:bg-background/40",
-                    ].join(" ")}
-                  >
-                    <span className="inline-flex items-center gap-2">
+        return (
+          <div key={`${section.title ?? "flat"}-${idx}`} className="space-y-2">
+            {showTitle && (
+              <div className="px-3 py-2 rounded-2xl bg-background/20 border border-border/60">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-foreground/70">
+                  {section.title}
+                </div>
+              </div>
+            )}
+
+            <ul className="space-y-1">
+              {visible.map((it) => {
+                const active = isActive(pathname, it.href);
+
+                return (
+                  <li key={it.href}>
+                    <Link
+                      href={it.href}
+                      className={[
+                        "group flex items-center gap-2 px-3 py-2 rounded-2xl text-sm transition border",
+                        active
+                          ? "bg-background border-border text-foreground"
+                          : "bg-transparent border-transparent text-foreground/75 hover:bg-background/25 hover:border-border/50",
+                      ].join(" ")}
+                    >
+                      {/* kropka jak na starym stylu */}
                       <span
                         className={[
-                          "h-1.5 w-1.5 rounded-full transition",
-                          active
-                            ? "bg-foreground"
-                            : "bg-foreground/30 group-hover:bg-foreground/60",
+                          "h-2 w-2 rounded-full",
+                          active ? "bg-foreground" : "bg-foreground/25 group-hover:bg-foreground/35",
                         ].join(" ")}
                       />
-                      {it.label}
-                    </span>
-                  </Link>
-                </li>
-              );
-            })}
-          </ul>
-
-          {si < sections.length - 1 && (
-            <div className="px-3">
-              <div className="h-px bg-border/60" />
-            </div>
-          )}
-        </div>
-      ))}
+                      <span className={active ? "font-semibold" : "font-medium"}>{it.label}</span>
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        );
+      })}
     </nav>
   );
 }

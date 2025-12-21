@@ -43,19 +43,31 @@ export async function POST(req: Request) {
     if (rpcError) {
       console.error("[accept-invite] RPC error:", rpcError);
 
-      const msg = rpcError.message || "";
+      const msg = (rpcError.message || "").trim();
+      const lower = msg.toLowerCase();
 
-      const isInvalid =
-        msg.toLowerCase().includes("invalid") ||
-        msg.toLowerCase().includes("expired");
+      const isExpired = lower.includes("expired") || lower.includes("wygas");
+      const isInvalid = lower.includes("invalid") || lower.includes("nieprawid");
+      const isDenied =
+        lower.includes("permission") ||
+        lower.includes("denied") ||
+        lower.includes("not allowed");
+
+      const status = isDenied ? 403 : isExpired ? 410 : isInvalid ? 400 : 500;
 
       return NextResponse.json(
         {
           ok: false,
-          error: isInvalid ? "invalid_or_expired_invite" : "rpc_error",
+          error: isExpired
+            ? "expired_invite"
+            : isInvalid
+            ? "invalid_invite"
+            : isDenied
+            ? "forbidden"
+            : "rpc_error",
           details: msg,
         },
-        { status: isInvalid ? 400 : 500 }
+        { status }
       );
     }
 

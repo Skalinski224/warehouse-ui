@@ -18,29 +18,27 @@ export default function TaskStatusBadge({ status }: Props) {
 
   switch (status) {
     case "todo":
-      colorClasses =
-        "bg-amber-500/10 text-amber-400 border-amber-500/40";
+      colorClasses = "bg-amber-500/10 text-amber-300 border-amber-500/40";
       break;
     case "in_progress":
-      colorClasses =
-        "bg-sky-500/10 text-sky-400 border-sky-500/40";
+      colorClasses = "bg-sky-500/10 text-sky-300 border-sky-500/40";
       break;
     case "done":
-      colorClasses =
-        "bg-emerald-500/10 text-emerald-400 border-emerald-500/40";
+      colorClasses = "bg-emerald-500/10 text-emerald-300 border-emerald-500/40";
       break;
     default:
-      colorClasses =
-        "bg-foreground/5 text-foreground/70 border-border/60";
+      colorClasses = "bg-foreground/5 text-foreground/70 border-border/60";
   }
 
   return (
     <span
       className={[
-        "inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium uppercase tracking-wide",
+        "inline-flex items-center rounded-full border px-2.5 py-1",
+        "text-[11px] font-medium uppercase tracking-wide",
         "shadow-sm",
         colorClasses,
       ].join(" ")}
+      title={LABELS[status] ?? status}
     >
       {LABELS[status] ?? status}
     </span>

@@ -1,9 +1,8 @@
-// src/components/Providers.tsx
 'use client';
 
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { createContext, useContext, useMemo } from 'react';
-import { supabaseBrowser } from '@/lib/supabaseClient'; // bezpośrednio klient przeglądarkowy
+import { supabaseBrowser } from '@/lib/supabaseClient';
 
 const queryClient = new QueryClient();
 
@@ -14,28 +13,23 @@ type CurrencyCtx = { currency: Currency; isLoading: boolean };
 const CurrencyContext = createContext<CurrencyCtx>({ currency: 'PLN', isLoading: true });
 
 function useFetchCurrency() {
-  // Tworzymy instancję tylko w kliencie (ten plik jest client-only)
   const supabase = useMemo(() => supabaseBrowser(), []);
 
   return useQuery({
-    queryKey: ['app_settings', 'currency'],
+    queryKey: ['account_settings', 'currency'],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('app_settings')
-        .select('currency_code')
-        .limit(1)
-        .single();
+      const { data, error } = await supabase.rpc('current_currency_code');
       if (error) throw error;
-      return (data?.currency_code ?? 'PLN') as Currency;
+      return (data ?? 'PLN') as Currency;
     },
-    staleTime: 60_000, // 1 min
+    staleTime: 60_000,
   });
 }
 
 function CurrencyProvider({ children }: { children: React.ReactNode }) {
   const { data, isLoading } = useFetchCurrency();
   const value = useMemo<CurrencyCtx>(
-    () => ({ currency: data ?? 'PLN', isLoading }),
+    () => ({ currency: (data ?? 'PLN') as Currency, isLoading }),
     [data, isLoading]
   );
   return <CurrencyContext.Provider value={value}>{children}</CurrencyContext.Provider>;

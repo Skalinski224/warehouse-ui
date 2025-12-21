@@ -2,23 +2,20 @@
 "use client";
 
 import { createContext, useContext } from "react";
-import type { AccountRole } from "./getCurrentRole";
+import type { PermissionSnapshot } from "@/lib/permissions";
 
-// Rola może być: "owner" | "manager" | "storeman" | "worker" | null
-export type MaybeRole = AccountRole | null;
-
-const RoleContext = createContext<MaybeRole>(null);
+const RoleContext = createContext<PermissionSnapshot | null>(null);
 
 export function RoleProvider({
   value,
   children,
 }: {
-  value: MaybeRole;
+  value: PermissionSnapshot | null;
   children: React.ReactNode;
 }) {
   return <RoleContext.Provider value={value}>{children}</RoleContext.Provider>;
 }
 
-export function useAccountRole(): MaybeRole {
+export function usePermissionSnapshot() {
   return useContext(RoleContext);
 }

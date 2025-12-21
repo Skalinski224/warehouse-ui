@@ -3,6 +3,8 @@
 
 import { useState, useTransition } from "react";
 import { supabaseClient } from "@/lib/supabaseClient";
+import { useCan } from "@/components/RoleGuard";
+import { PERM } from "@/lib/permissions";
 
 type Props = {
   memberId: string;
@@ -10,6 +12,10 @@ type Props = {
 };
 
 export default function ResendInviteButton({ memberId, email }: Props) {
+  // ✅ tylko owner + manager
+  const canResend = useCan(PERM.TEAM_INVITE);
+  if (!canResend) return null;
+
   const [isPending, startTransition] = useTransition();
   const [message, setMessage] = useState<string | null>(null);
 

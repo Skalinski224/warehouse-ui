@@ -1,34 +1,38 @@
+// src/lib/currentUser.ts
 import { supabaseServer } from "@/lib/supabaseServer";
+import type { PermissionSnapshot } from "@/lib/permissions";
 
-export type CurrentUserInfo = {
-  id: string;
-  email: string;
-  name: string;
-  role: "manager" | "storeman" | "worker";
-};
+function toSafeSnapshot(row: any): PermissionSnapshot {
+  const account_id =
+    typeof row?.account_id === "string" || row?.account_id === null ? row.account_id : null;
 
-const ROLES = new Set(["manager", "storeman", "worker"] as const);
+  const role = typeof row?.role === "string" || row?.role === null ? row.role : null;
 
-export async function getCurrentUserInfo(): Promise<CurrentUserInfo | null> {
+  const permissions = Array.isArray(row?.permissions)
+    ? row.permissions.filter((x: unknown) => typeof x === "string")
+    : [];
+
+  return { account_id, role, permissions };
+}
+
+export async function getPermissionSnapshot(): Promise<PermissionSnapshot | null> {
   const sb = await supabaseServer();
 
-  const { data: userData } = await sb.auth.getUser();
-  const user = userData?.user;
-  if (!user) return null;
-
-  // Pobranie roli – nie używamy .single() na RPC zwracającym scalar.
-  let role: CurrentUserInfo["role"] = "worker";
-  const { data: roleData, error: roleErr } = await sb.rpc("current_app_role");
-
-  if (!roleErr && typeof roleData === "string" && ROLES.has(roleData as any)) {
-    role = roleData as CurrentUserInfo["role"];
+  // ✅ jeśli SSR nie widzi usera -> nie ma sensu wołać RPC
+  const { data: u } = await sb.auth.getUser();
+  if (!u?.user) {
+    return { account_id: null, role: null, permissions: [] };
   }
 
-  const email = user.email ?? "";
-  const metaName = (user.user_metadata?.full_name ||
-    user.user_metadata?.name ||
-    "").toString().trim();
-  const name = metaName || (email ? email.split("@")[0] : "Użytkownik");
+  const { data, error } = await sb.rpc("my_permissions_snapshot");
 
-  return { id: user.id, email, name, role };
+  if (error) {
+    console.error("my_permissions_snapshot error:", error);
+    return { account_id: null, role: null, permissions: [] };
+  }
+
+  const row = Array.isArray(data) ? (data[0] ?? null) : (data ?? null);
+  if (!row) return { account_id: null, role: null, permissions: [] };
+
+  return toSafeSnapshot(row);
 }

@@ -5,7 +5,7 @@ import { supabaseServer } from "@/lib/supabaseServer";
 
 const BodySchema = z.object({
   member_id: z.string().uuid(),
-  role: z.enum(["owner", "manager", "storeman", "worker"]),
+  role: z.enum(["owner", "manager", "foreman", "storeman", "worker"]),
 });
 
 export async function POST(req: Request) {
@@ -15,18 +15,13 @@ export async function POST(req: Request) {
 
     if (!parsed.success) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "invalid_body",
-          details: parsed.error.flatten(),
-        },
+        { ok: false, error: "invalid_body", details: parsed.error.flatten() },
         { status: 400 }
       );
     }
 
     const { member_id, role } = parsed.data;
 
-    // ❗ Poprawka: supabaseServer() musi być await
     const supabase = await supabaseServer();
 
     const { error } = await supabase.rpc("set_member_role", {
@@ -37,11 +32,7 @@ export async function POST(req: Request) {
     if (error) {
       console.error("[set_member_role] RPC error:", error);
       return NextResponse.json(
-        {
-          ok: false,
-          error: "rpc_error",
-          details: error.message ?? null,
-        },
+        { ok: false, error: "rpc_error", details: error.message ?? null },
         { status: 400 }
       );
     }
@@ -50,11 +41,7 @@ export async function POST(req: Request) {
   } catch (err: any) {
     console.error("[set_member_role] Unexpected error:", err);
     return NextResponse.json(
-      {
-        ok: false,
-        error: "internal_error",
-        message: err?.message ?? "Unexpected server error",
-      },
+      { ok: false, error: "internal_error", details: err?.message ?? "Unexpected server error" },
       { status: 500 }
     );
   }

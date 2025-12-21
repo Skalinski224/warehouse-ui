@@ -1,9 +1,8 @@
+// src/app/(app)/tasks/page.tsx
 import { supabaseServer } from "@/lib/supabaseServer";
-import { getCurrentRole } from "@/lib/getCurrentRole";
-import MyTasksTable, {
-  type MyTaskRow,
-} from "@/components/tasks/MyTasksTable";
+import MyTasksTable, { type MyTaskRow } from "@/components/tasks/MyTasksTable";
 import NewTaskForm from "@/components/tasks/NewTaskForm";
+import { PERM, can, type PermissionSnapshot } from "@/lib/permissions";
 
 /* -------------------------------------------------------- */
 /*                    Typy pomocnicze                       */
@@ -25,42 +24,50 @@ type MemberOption = {
 };
 
 /* -------------------------------------------------------- */
+/*              Snapshot permissions (DB source)            */
+/* -------------------------------------------------------- */
+
+async function fetchMyPermissionsSnapshot(): Promise<PermissionSnapshot | null> {
+  const supabase = await supabaseServer();
+  const { data, error } = await supabase.rpc("my_permissions_snapshot");
+
+  if (error) {
+    console.error("fetchMyPermissionsSnapshot error:", error);
+    return null;
+  }
+
+  const snap = Array.isArray(data) ? (data[0] ?? null) : (data ?? null);
+  return (snap as PermissionSnapshot | null) ?? null;
+}
+
+/* -------------------------------------------------------- */
 /*                    Wspólne mapowanie                     */
 /* -------------------------------------------------------- */
 
+function getRelOne<T>(rel: T | T[] | null | undefined): T | null {
+  if (!rel) return null;
+  if (Array.isArray(rel)) return (rel[0] as T) ?? null;
+  return rel as T;
+}
+
+function memberLabelFromRow(member: any): string | null {
+  if (!member) return null;
+  const f = (member.first_name as string | null) ?? "";
+  const l = (member.last_name as string | null) ?? "";
+  const e = (member.email as string | null) ?? "";
+  const namePart = [f, l].filter(Boolean).join(" ");
+  return namePart || e || null;
+}
+
 function mapTaskRowBase(row: any): MyTaskRow {
-  const place = row.project_places as
-    | { id: string; name: string | null }
-    | null
-    | undefined;
-
-  const crewsRel = row.crews as
-    | { id: string; name: string | null }
-    | { id: string; name: string | null }[]
-    | null
-    | undefined;
-
-  let crewName: string | null = null;
-  if (Array.isArray(crewsRel)) {
-    if (crewsRel.length > 0) crewName = crewsRel[0]?.name ?? null;
-  } else if (crewsRel) {
-    crewName = crewsRel.name ?? null;
-  }
-
-  // Może być niezaładowane (worker nie robi JOIN na team_members)
-  const memberRel = row.team_members as
-    | { id: string; first_name: string | null; last_name: string | null; email: string | null }
-    | null
-    | undefined;
-
-  let assigneeName: string | null = null;
-  if (memberRel) {
-    const f = (memberRel.first_name as string | null) ?? "";
-    const l = (memberRel.last_name as string | null) ?? "";
-    const e = (memberRel.email as string | null) ?? "";
-    const namePart = [f, l].filter(Boolean).join(" ");
-    assigneeName = namePart || e || null;
-  }
+  const place = getRelOne<{ id: string; name: string | null }>(row.project_places);
+  const crewRel = getRelOne<{ id: string; name: string | null }>(row.crews);
+  const memberRel = getRelOne<{
+    id: string;
+    first_name: string | null;
+    last_name: string | null;
+    email: string | null;
+  }>(row.team_members);
 
   return {
     id: String(row.id),
@@ -68,16 +75,16 @@ function mapTaskRowBase(row: any): MyTaskRow {
     status: row.status as MyTaskRow["status"],
     placeId: row.place_id ? String(row.place_id) : null,
     placeName: place?.name ?? null,
-    crewName,
-    assigneeName,
+    crewName: crewRel?.name ?? null,
+    assigneeName: memberLabelFromRow(memberRel),
   };
 }
 
 /* -------------------------------------------------------- */
-/*                    FETCH – MANAGER / OWNER               */
+/*                    FETCH – READ ALL                      */
 /* -------------------------------------------------------- */
 
-async function fetchManagerTasks(): Promise<MyTaskRow[]> {
+async function fetchAllTasks(): Promise<MyTaskRow[]> {
   const supabase = await supabaseServer();
 
   const { data, error } = await supabase
@@ -107,26 +114,24 @@ async function fetchManagerTasks(): Promise<MyTaskRow[]> {
       `
     )
     .is("deleted_at", null)
+    .neq("status", "done")
     .order("created_at", { ascending: true });
 
   if (error) {
-    console.error("fetchManagerTasks error:", error);
+    console.error("fetchAllTasks error:", error);
     return [];
   }
 
-  const rows = (data ?? []) as any[];
-  return rows.map(mapTaskRowBase);
+  return (data ?? []).map(mapTaskRowBase);
 }
 
 /* -------------------------------------------------------- */
-/*                      FETCH – WORKER                      */
-/*   (zadania przypisane do brygad i/lub konkretnej osoby)  */
+/*                    FETCH – READ OWN                      */
 /* -------------------------------------------------------- */
 
-async function fetchWorkerTasks(userId: string): Promise<MyTaskRow[]> {
+async function fetchOwnTasks(userId: string): Promise<MyTaskRow[]> {
   const supabase = await supabaseServer();
 
-  // 1) członkostwo użytkownika
   const { data: memberRows, error: memberError } = await supabase
     .from("team_members")
     .select("id, crew_id")
@@ -134,7 +139,7 @@ async function fetchWorkerTasks(userId: string): Promise<MyTaskRow[]> {
     .is("deleted_at", null);
 
   if (memberError) {
-    console.error("fetchWorkerTasks team_members error:", memberError);
+    console.error("fetchOwnTasks team_members error:", memberError);
     return [];
   }
 
@@ -165,59 +170,46 @@ async function fetchWorkerTasks(userId: string): Promise<MyTaskRow[]> {
 
   const rows: any[] = [];
 
-  // 2a) zadania przypisane do brygad użytkownika
   if (crewIds.length > 0) {
     const { data: crewTasks, error: crewError } = await supabase
       .from("project_tasks")
       .select(selectClause)
       .in("assigned_crew_id", crewIds)
       .is("deleted_at", null)
+      .neq("status", "done")
       .order("created_at", { ascending: true });
 
-    if (crewError) {
-      console.error("fetchWorkerTasks crew tasks error:", crewError);
-    } else if (crewTasks) {
-      rows.push(...crewTasks);
-    }
+    if (crewError) console.error("fetchOwnTasks crew tasks error:", crewError);
+    else if (crewTasks) rows.push(...crewTasks);
   }
 
-  // 2b) zadania przypisane konkretnie do tej osoby
   if (memberIds.length > 0) {
     const { data: memberTasks, error: memberTasksError } = await supabase
       .from("project_tasks")
       .select(selectClause)
       .in("assigned_member_id", memberIds)
       .is("deleted_at", null)
+      .neq("status", "done")
       .order("created_at", { ascending: true });
 
-    if (memberTasksError) {
-      console.error("fetchWorkerTasks member tasks error:", memberTasksError);
-    } else if (memberTasks) {
-      rows.push(...memberTasks);
-    }
+    if (memberTasksError) console.error("fetchOwnTasks member tasks error:", memberTasksError);
+    else if (memberTasks) rows.push(...memberTasks);
   }
 
-  if (rows.length === 0) {
-    return [];
-  }
+  if (rows.length === 0) return [];
 
-  // 3) deduplikacja po id (jeśli zadanie jest i na brygadę, i na osobę)
   const byId = new Map<string, any>();
-  for (const row of rows) {
-    byId.set(String((row as any).id), row);
-  }
+  for (const row of rows) byId.set(String((row as any).id), row);
 
   return Array.from(byId.values()).map(mapTaskRowBase);
 }
 
 /* -------------------------------------------------------- */
 /*                 FETCH – miejsca / brygady / osoby        */
-/*                 (używane tylko przez managera)           */
 /* -------------------------------------------------------- */
 
 async function fetchPlaceOptions(): Promise<PlaceOption[]> {
   const supabase = await supabaseServer();
-
   const { data, error } = await supabase
     .from("project_places")
     .select("id, name")
@@ -237,11 +229,9 @@ async function fetchPlaceOptions(): Promise<PlaceOption[]> {
 
 async function fetchCrewOptions(): Promise<CrewOption[]> {
   const supabase = await supabaseServer();
-
-  const { data, error } = await supabase
-    .from("crews")
-    .select("id, name")
-    .order("name", { ascending: true });
+  const { data, error } = await supabase.from("crews").select("id, name").order("name", {
+    ascending: true,
+  });
 
   if (error) {
     console.error("fetchCrewOptions error:", error);
@@ -256,7 +246,6 @@ async function fetchCrewOptions(): Promise<CrewOption[]> {
 
 async function fetchMemberOptions(): Promise<MemberOption[]> {
   const supabase = await supabaseServer();
-
   const { data, error } = await supabase
     .from("team_members")
     .select("id, first_name, last_name, email, status")
@@ -269,20 +258,13 @@ async function fetchMemberOptions(): Promise<MemberOption[]> {
     return [];
   }
 
-  const rows = (data ?? []) as any[];
-
-  return rows.map((row) => {
+  return (data ?? []).map((row: any) => {
     const first = (row.first_name as string | null) ?? "";
     const last = (row.last_name as string | null) ?? "";
     const email = (row.email as string | null) ?? "";
-
     const namePart = [first, last].filter(Boolean).join(" ");
     const label = namePart || email || "Bez nazwy";
-
-    return {
-      id: String(row.id),
-      label,
-    };
+    return { id: String(row.id), label };
   });
 }
 
@@ -292,16 +274,20 @@ async function fetchMemberOptions(): Promise<MemberOption[]> {
 
 export default async function MyTasksPage() {
   const supabase = await supabaseServer();
-  const { data: auth, error: authError } = await supabase.auth.getUser();
 
-  if (authError) {
-    console.error("MyTasksPage getUser error:", authError);
-  }
+  const [{ data: auth, error: authError }, snapshot] = await Promise.all([
+    supabase.auth.getUser(),
+    fetchMyPermissionsSnapshot(),
+  ]);
+
+  if (authError) console.error("MyTasksPage getUser error:", authError);
 
   const user = auth?.user ?? null;
 
-  const role = await getCurrentRole();
-  const isManager = role === "owner" || role === "manager";
+  const canReadAll = can(snapshot, PERM.TASKS_READ_ALL);
+  const canReadOwn = can(snapshot, PERM.TASKS_READ_OWN);
+
+  const isManager = canReadAll;
 
   let tasks: MyTaskRow[] = [];
   let placeOptions: PlaceOption[] = [];
@@ -309,9 +295,9 @@ export default async function MyTasksPage() {
   let memberOptions: MemberOption[] = [];
 
   if (user) {
-    if (isManager) {
+    if (canReadAll) {
       const [tasksRes, placesRes, crewsRes, membersRes] = await Promise.all([
-        fetchManagerTasks(),
+        fetchAllTasks(),
         fetchPlaceOptions(),
         fetchCrewOptions(),
         fetchMemberOptions(),
@@ -321,8 +307,10 @@ export default async function MyTasksPage() {
       placeOptions = placesRes;
       crewOptions = crewsRes;
       memberOptions = membersRes;
+    } else if (canReadOwn) {
+      tasks = await fetchOwnTasks(user.id);
     } else {
-      tasks = await fetchWorkerTasks(user.id);
+      tasks = [];
     }
   }
 
@@ -332,17 +320,13 @@ export default async function MyTasksPage() {
         <h1 className="text-2xl font-semibold">Moje zadania</h1>
         <p className="text-sm text-foreground/70">
           {isManager
-            ? "Przegląd wszystkich zadań w projekcie. Użyj wyszukiwarki, żeby znaleźć zadanie po tytule, miejscu lub przypisanej osobie/brygadzie."
+            ? "Przegląd wszystkich zadań w projekcie. Szukaj po tytule, miejscu lub przypisaniu."
             : "Lista zadań przypisanych do Ciebie lub Twojej brygady."}
         </p>
       </header>
 
       {isManager && (
-        <NewTaskForm
-          places={placeOptions}
-          crewOptions={crewOptions}
-          memberOptions={memberOptions}
-        />
+        <NewTaskForm places={placeOptions} crewOptions={crewOptions} memberOptions={memberOptions} />
       )}
 
       <MyTasksTable tasks={tasks} isManager={isManager} />

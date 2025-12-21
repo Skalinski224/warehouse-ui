@@ -1,3 +1,4 @@
+// src/app/api/team/invite/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { supabaseServer } from "@/lib/supabaseServer";
@@ -11,8 +12,29 @@ const BodySchema = z.object({
   first_name: z.string().min(1),
   last_name: z.string().min(1),
   phone: z.string().trim().optional().nullable(),
-  role: z.enum(["manager", "storeman", "worker"]).default("worker"),
+  role: z.enum(["manager", "storeman", "foreman", "worker"]).default("worker"),
 });
+
+function pickToken(tokenData: unknown): string {
+  // 1) prosto string
+  if (typeof tokenData === "string") return tokenData;
+
+  // 2) Supabase czasem zwraca rekord / tablicę rekordów
+  if (Array.isArray(tokenData)) {
+    const first = tokenData[0] as any;
+    const t = first?.token;
+    return typeof t === "string" ? t : String(t ?? "");
+  }
+
+  // 3) obiekt z polem token
+  if (tokenData && typeof tokenData === "object") {
+    const t = (tokenData as any)?.token;
+    return typeof t === "string" ? t : String(t ?? "");
+  }
+
+  // 4) fallback
+  return String(tokenData ?? "");
+}
 
 export async function POST(req: Request) {
   try {
@@ -37,8 +59,14 @@ export async function POST(req: Request) {
     // ===============================
     const supabase = await supabaseServer();
 
+    // 0) musi być zalogowany user (żeby SECURITY DEFINER + auth.uid() miało sens)
+    const { data: auth, error: authErr } = await supabase.auth.getUser();
+    if (authErr || !auth?.user) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
+
     // ===============================
-    //  1. RPC — nowa funkcja w bazie
+    //  1. RPC — funkcja w bazie
     // ===============================
     const { data: tokenData, error: rpcError } = await supabase.rpc(
       "invite_team_member",
@@ -62,8 +90,19 @@ export async function POST(req: Request) {
       );
     }
 
-    // SQL zwraca token jako TEXT
-    const token = typeof tokenData === "string" ? tokenData : String(tokenData);
+    // ✅ Token (obsługa: string | {token} | [{token}] )
+    const token = pickToken(tokenData).trim();
+
+    if (!token || token === "[object Object]") {
+      console.error("[invite] RPC returned invalid tokenData:", tokenData);
+      return NextResponse.json(
+        {
+          error: "invite_failed",
+          message: "RPC nie zwróciło poprawnego tokena zaproszenia.",
+        },
+        { status: 400 }
+      );
+    }
 
     // ===============================
     //  2. Generujemy link do zaproszenia

@@ -1,16 +1,39 @@
 // src/lib/getImageUrl.ts
-import { supabaseBrowser } from '@/lib/supabaseBrowser';
-import { supabaseServer } from '@/lib/supabaseServer';
+import "server-only";
+
+import { supabaseBrowser } from "@/lib/supabaseBrowser";
+import { supabaseServer } from "@/lib/supabaseServer";
+import { PERM, can } from "@/lib/permissions";
 
 /**
- * Zwraca publiczny URL pliku z Supabase Storage (np. material-images, report-images, invoices).
- * Działa zarówno po stronie serwera (Server Component / Server Action),
- * jak i w komponentach klienckich.
- *
- * @param bucket nazwa bucketa (np. 'material-images')
- * @param path ścieżka do pliku (np. `${account_id}/materials/uuid.jpg`)
- * @param clientSide jeśli true → używa klienta przeglądarkowego (dla komponentów client)
+ * 🔐 Zasada:
+ * - ZAWSZE weryfikujemy account + permission po stronie serwera
+ * - clientSide = true → TYLKO dla publicznych bucketów
  */
+
+async function getSnapshot() {
+  const supabase = await supabaseServer();
+  const { data } = await supabase.rpc("my_permissions_snapshot");
+  return Array.isArray(data) ? data[0] : data;
+}
+
+async function getCurrentAccountId(): Promise<string | null> {
+  const supabase = await supabaseServer();
+  const { data } = await supabase.rpc("current_account_id");
+  if (typeof data === "string") return data;
+  if (data && typeof data === "object") {
+    return (data as any).current_account_id ?? null;
+  }
+  return null;
+}
+
+function assertPathMatchesAccount(path: string, accountId: string) {
+  const prefix = `${accountId}/`;
+  if (!path.startsWith(prefix)) {
+    throw new Error("Access denied: foreign account asset");
+  }
+}
+
 export async function getImageUrl(
   bucket: string,
   path: string | null | undefined,
@@ -18,45 +41,58 @@ export async function getImageUrl(
 ): Promise<string | null> {
   if (!path) return null;
 
-  try {
-    const sb = clientSide ? supabaseBrowser() : await supabaseServer();
-    const { data } = sb.storage.from(bucket).getPublicUrl(path);
+  // CLIENT — tylko publiczne bucket + po server gate
+  if (clientSide) {
+    // clientSide NIE MOŻE sam decydować
+    return null;
+  }
 
-    // Supabase zawsze zwraca .publicUrl nawet przy nieistniejącym pliku
+  // SERVER SIDE — twarda walidacja
+  try {
+    const supabase = await supabaseServer();
+    const snapshot = await getSnapshot();
+    const accountId = await getCurrentAccountId();
+
+    if (!snapshot || !accountId) return null;
+
+    assertPathMatchesAccount(path, accountId);
+
+    // Permission per bucket
+    const allowed =
+      bucket === "material-images"
+        ? can(snapshot, PERM.MATERIALS_READ)
+        : bucket === "report-images"
+        ? can(snapshot, PERM.DAILY_REPORTS_READ)
+        : bucket === "invoices"
+        ? can(snapshot, PERM.DELIVERIES_READ)
+        : false;
+
+    if (!allowed) return null;
+
+    const { data } = supabase.storage.from(bucket).getPublicUrl(path);
     return data?.publicUrl ?? null;
   } catch (err) {
-    console.warn('getImageUrl error:', err);
+    console.warn("getImageUrl blocked:", err);
     return null;
   }
 }
 
-/**
- * Skrót: pobierz URL obrazu materiału.
- * Automatycznie kieruje do bucketa `material-images`.
- */
+/* ---------------------------------- ALIASY -------------------------------- */
+
 export async function getMaterialImageUrl(
-  path: string | null | undefined,
-  clientSide = false
+  path: string | null | undefined
 ): Promise<string | null> {
-  return await getImageUrl('material-images', path, clientSide);
+  return getImageUrl("material-images", path, false);
 }
 
-/**
- * Skrót: pobierz URL obrazu raportu dziennego (`report-images`).
- */
 export async function getReportImageUrl(
-  path: string | null | undefined,
-  clientSide = false
+  path: string | null | undefined
 ): Promise<string | null> {
-  return await getImageUrl('report-images', path, clientSide);
+  return getImageUrl("report-images", path, false);
 }
 
-/**
- * Skrót: pobierz URL faktury (`invoices`).
- */
 export async function getInvoiceUrl(
-  path: string | null | undefined,
-  clientSide = false
+  path: string | null | undefined
 ): Promise<string | null> {
-  return await getImageUrl('invoices', path, clientSide);
+  return getImageUrl("invoices", path, false);
 }

@@ -2,6 +2,9 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { supabaseBrowser } from "@/lib/supabaseBrowser";
+import { useCan } from "@/components/RoleGuard";
+import { PERM } from "@/lib/permissions";
 
 type Props = {
   memberId: string;
@@ -9,6 +12,10 @@ type Props = {
 };
 
 export default function ForcePasswordResetButton({ memberId, email }: Props) {
+  // ✅ foreman/manager/owner (wg PERM)
+  const canForceReset = useCan(PERM.TEAM_MEMBER_FORCE_RESET);
+  if (!canForceReset) return null;
+
   const [isPending, startTransition] = useTransition();
   const [message, setMessage] = useState<string | null>(null);
 
@@ -22,24 +29,35 @@ export default function ForcePasswordResetButton({ memberId, email }: Props) {
 
     startTransition(async () => {
       try {
-        const res = await fetch("/api/team/force-password-reset", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ memberId, email }),
-        });
+        const sb = supabaseBrowser();
+        const { data } = await sb.auth.getSession();
+        const accessToken = data.session?.access_token;
 
-        if (!res.ok) {
-          const text = await res.text().catch(() => "");
-          console.error("force-password-reset API error:", res.status, text);
-          setMessage("Nie udało się wymusić resetu hasła.");
+        if (!accessToken) {
+          setMessage("Brak sesji. Odśwież stronę i spróbuj ponownie.");
           return;
         }
 
-        setMessage("Link do resetu hasła został wygenerowany i wysłany.");
+        const res = await fetch("/api/team/member/reset-password", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({ memberId }),
+        });
+
+        if (!res.ok) {
+          const json = await res.json().catch(() => ({}));
+          const msg = json?.error || "Nie udało się wymusić resetu hasła.";
+          console.error("reset-password API error:", res.status, json);
+          setMessage(msg);
+          return;
+        }
+
+        setMessage("Link do ustawienia nowego hasła został wysłany e-mailem.");
       } catch (err) {
-        console.error("force-password-reset fetch error:", err);
+        console.error("reset-password fetch error:", err);
         setMessage("Wystąpił błąd podczas wywołania resetu hasła.");
       }
     });
@@ -55,6 +73,7 @@ export default function ForcePasswordResetButton({ memberId, email }: Props) {
       >
         {isPending ? "Wysyłam link..." : "Wymuś reset hasła"}
       </button>
+
       {message && (
         <span className="text-[11px] text-muted-foreground">{message}</span>
       )}
