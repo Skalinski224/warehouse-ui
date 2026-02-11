@@ -10,10 +10,16 @@ import BackButton from "@/components/BackButton";
 
 import { PERM, can, canAny, type PermissionSnapshot } from "@/lib/permissions";
 
+// ✅ server actions PRZENIESIONE POZA PAGE
+import {
+  updateTeamMemberAction,
+  deleteTeamMemberAction,
+  resendInviteAction,
+} from "./actions";
+
 export const dynamic = "force-dynamic";
 
 /* ------------------------------ HELPERS ------------------------------ */
-
 function unwrapSnapshot(data: unknown): PermissionSnapshot | null {
   if (!data) return null;
   if (Array.isArray(data)) return (data[0] as PermissionSnapshot) ?? null;
@@ -30,91 +36,7 @@ async function fetchMyPermissionsSnapshot(): Promise<PermissionSnapshot | null> 
   return unwrapSnapshot(data);
 }
 
-function requirePerm(snapshot: PermissionSnapshot | null, key: any) {
-  if (!can(snapshot, key)) notFound();
-}
-
-/* ------------------------------ ACTIONS ------------------------------ */
-
-export async function updateTeamMemberAction(form: {
-  id: string;
-  first_name?: string | null;
-  last_name?: string | null;
-  email?: string | null;
-  phone?: string | null;
-  account_role?: string | null;
-  crew_id?: string | null;
-}) {
-  "use server";
-
-  const supabase = await supabaseServer();
-  const snapshot = await fetchMyPermissionsSnapshot();
-
-  // Budujemy patch tylko z pól, które przyszły
-  const update: Record<string, any> = {};
-  if ("first_name" in form) update.first_name = form.first_name;
-  if ("last_name" in form) update.last_name = form.last_name;
-  if ("email" in form) update.email = form.email;
-  if ("phone" in form) update.phone = form.phone;
-  if ("crew_id" in form) update.crew_id = form.crew_id;
-
-  if (Object.keys(update).length === 0) return;
-
-  const touchedKeys = Object.keys(update);
-  const onlyCrewChange = touchedKeys.every((k) => k === "crew_id");
-
-  // Gating wg kanonu
-  if (onlyCrewChange) {
-    requirePerm(snapshot, PERM.TEAM_MANAGE_CREWS);
-  } else {
-    requirePerm(snapshot, PERM.TEAM_MANAGE_ROLES);
-  }
-
-  const { error } = await supabase.from("team_members").update(update).eq("id", form.id);
-
-  if (error) {
-    console.error("team_members update error:", error);
-    throw new Error("Nie udało się zaktualizować danych członka zespołu.");
-  }
-}
-
-export async function deleteTeamMemberAction(id: string) {
-  "use server";
-
-  const supabase = await supabaseServer();
-  const snapshot = await fetchMyPermissionsSnapshot();
-
-  requirePerm(snapshot, PERM.TEAM_REMOVE);
-
-  const { error } = await supabase.rpc("delete_team_member", { p_member_id: id });
-
-  if (error) {
-    console.error("delete_team_member error:", error);
-    throw new Error("Nie udało się usunąć członka zespołu.");
-  }
-}
-
-export async function resendInviteAction(id: string) {
-  "use server";
-
-  const supabase = await supabaseServer();
-  const snapshot = await fetchMyPermissionsSnapshot();
-
-  requirePerm(snapshot, PERM.TEAM_INVITE);
-
-  const { data, error } = await supabase.rpc("rotate_invite_token", { p_member_id: id });
-
-  if (error) {
-    console.error("rotate_invite_token error:", error);
-    throw new Error("Nie udało się wygenerować nowego zaproszenia.");
-  }
-
-  // nie logujemy tokenów na serwerze
-  return data;
-}
-
 /* ------------------------------- PAGE ------------------------------- */
-
 export default async function TeamPage() {
   const supabase = await supabaseServer();
   const snapshot = await fetchMyPermissionsSnapshot();
@@ -146,6 +68,7 @@ export default async function TeamPage() {
 
   const members = (data ?? []) as VTeamMember[];
 
+  // ⚠️ ważne: to nadal te same akcje, tylko importowane z ./actions
   const onEdit = canChangeCrew || canEditDetails ? updateTeamMemberAction : undefined;
   const onDelete = canRemove ? deleteTeamMemberAction : undefined;
   const onResendInvite = canInvite ? resendInviteAction : undefined;
@@ -185,26 +108,18 @@ export default async function TeamPage() {
               </div>
               <div className="text-[11px] opacity-70">
                 Dostęp:{" "}
-                <span className="font-medium">
-                  {canInvite ? "zapraszanie" : "bez zapraszania"}
-                </span>
-                ,{" "}
+                <span className="font-medium">{canInvite ? "zapraszanie" : "bez zapraszania"}</span>,{" "}
                 <span className="font-medium">
                   {canChangeCrew ? "zmiana brygad" : "bez zmiany brygad"}
-                </span>
-                ,{" "}
-                <span className="font-medium">
-                  {canChangeRole ? "zmiana ról" : "bez zmiany ról"}
-                </span>
+                </span>,{" "}
+                <span className="font-medium">{canChangeRole ? "zmiana ról" : "bez zmiany ról"}</span>
               </div>
             </div>
           )}
         </div>
 
         {/* InviteForm sam robi modal; renderujemy tylko jeśli ma perm */}
-        <div className="flex items-center justify-end gap-2">
-          {canInvite ? <InviteForm /> : null}
-        </div>
+        <div className="flex items-center justify-end gap-2">{canInvite ? <InviteForm /> : null}</div>
       </div>
 
       {/* TABELA */}
