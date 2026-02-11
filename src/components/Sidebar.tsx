@@ -1,10 +1,10 @@
-// src/components/Sidebar.tsx
 "use client";
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { usePermissionSnapshot } from "@/lib/RoleContext";
 import { PERM, can, type PermissionKey } from "@/lib/permissions";
+import { FLAGS } from "@/lib/flags";
 
 type NavItem = {
   href: string;
@@ -17,9 +17,9 @@ type Section = {
   items: NavItem[];
 };
 
-const APP_NAME = "Warehouse UI"; // <- tu ustaw nazwę aplikacji (zamiast "Dashboard")
+const APP_NAME = "Warehouse UI";
 
-// 🔥 kanoniczna lista (kolejność wg Twoich wytycznych)
+// kanoniczna lista
 const ALL_ITEMS: {
   home: NavItem;
   myTasks: NavItem;
@@ -33,7 +33,7 @@ const ALL_ITEMS: {
   object: NavItem;
   team: NavItem;
 } = {
-  home: { href: "/", label: APP_NAME, perm: PERM.METRICS_READ }, // perm tylko jako “gating minimalny” (poniżej i tak przepuszczamy owner/manager)
+  home: { href: "/", label: APP_NAME, perm: PERM.METRICS_READ },
   myTasks: { href: "/tasks", label: "Moje zadania", perm: PERM.TASKS_READ_OWN },
   analytics: { href: "/analyze/metrics", label: "Analizy", perm: PERM.METRICS_READ },
   lowStock: { href: "/low-stock", label: "Co się kończy", perm: PERM.LOW_STOCK_READ },
@@ -48,35 +48,40 @@ const ALL_ITEMS: {
   team: { href: "/team", label: "Zespół", perm: PERM.TEAM_READ },
 };
 
-// 🧠 polityka “co kto widzi” wg roli (UI), a finalnie i tak `can(snapshot, perm)`
+// helper: wywal “Analizy” gdy flaga OFF
+function filterByFlags(items: NavItem[]) {
+  if (FLAGS.metricsDevOnly) {
+    return items.filter((i) => i.href !== ALL_ITEMS.analytics.href);
+  }
+  return items;
+}
+
 function roleSections(role: string | null): Section[] {
   const r = (role ?? "").toLowerCase();
 
-  // worker: jedna lista, bez sekcji
   if (r === "worker") {
     return [
       {
-        items: [
+        items: filterByFlags([
           ALL_ITEMS.materials,
           ALL_ITEMS.dailyReports,
           ALL_ITEMS.myTasks,
           ALL_ITEMS.team,
-        ],
+        ]),
       },
     ];
   }
 
-  // foreman
   if (r === "foreman") {
     return [
       {
         title: "NAWIGACJA",
-        items: [
+        items: filterByFlags([
           ALL_ITEMS.myTasks,
           ALL_ITEMS.analytics,
           ALL_ITEMS.lowStock,
           ALL_ITEMS.reports,
-        ],
+        ]),
       },
       {
         title: "MAGAZYN",
@@ -89,17 +94,16 @@ function roleSections(role: string | null): Section[] {
     ];
   }
 
-  // storeman
   if (r === "storeman") {
     return [
       {
         title: "NAWIGACJA",
-        items: [
+        items: filterByFlags([
           ALL_ITEMS.myTasks,
           ALL_ITEMS.analytics,
           ALL_ITEMS.lowStock,
           ALL_ITEMS.reports,
-        ],
+        ]),
       },
       {
         title: "MAGAZYN",
@@ -117,16 +121,16 @@ function roleSections(role: string | null): Section[] {
     ];
   }
 
-  // manager / owner (i reszta) – pełny dostęp
+  // manager/owner
   return [
     {
       title: "NAWIGACJA",
-      items: [
+      items: filterByFlags([
         ALL_ITEMS.myTasks,
         ALL_ITEMS.analytics,
         ALL_ITEMS.lowStock,
         ALL_ITEMS.reports,
-      ],
+      ]),
     },
     {
       title: "MAGAZYN",
@@ -156,13 +160,10 @@ export default function Sidebar() {
   if (!snapshot) return null;
 
   const sections = roleSections(snapshot.role ?? null);
-
-  // top link zawsze widoczny dla zalogowanego (to tylko UX), a uprawnienia i tak blokują strony
   const topActive = isActive(pathname, "/");
 
   return (
     <nav className="p-3 space-y-4">
-      {/* Top brand / home */}
       <Link
         href="/"
         className={[
@@ -176,7 +177,6 @@ export default function Sidebar() {
         <div className="text-[11px] text-foreground/55">Panel aplikacji</div>
       </Link>
 
-      {/* Sections */}
       {sections.map((section, idx) => {
         const visible = section.items.filter((i) => can(snapshot, i.perm));
         if (visible.length === 0) return null;
@@ -208,14 +208,17 @@ export default function Sidebar() {
                           : "bg-transparent border-transparent text-foreground/75 hover:bg-background/25 hover:border-border/50",
                       ].join(" ")}
                     >
-                      {/* kropka jak na starym stylu */}
                       <span
                         className={[
                           "h-2 w-2 rounded-full",
-                          active ? "bg-foreground" : "bg-foreground/25 group-hover:bg-foreground/35",
+                          active
+                            ? "bg-foreground"
+                            : "bg-foreground/25 group-hover:bg-foreground/35",
                         ].join(" ")}
                       />
-                      <span className={active ? "font-semibold" : "font-medium"}>{it.label}</span>
+                      <span className={active ? "font-semibold" : "font-medium"}>
+                        {it.label}
+                      </span>
                     </Link>
                   </li>
                 );
