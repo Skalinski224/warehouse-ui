@@ -50,7 +50,7 @@ const ALL_ITEMS: {
 
 // helper: wywal “Analizy” gdy flaga OFF
 function filterByFlags(items: NavItem[]) {
-  if (FLAGS.metricsDevOnly) {
+  if (!FLAGS.metricsDevOnly) {
     return items.filter((i) => i.href !== ALL_ITEMS.analytics.href);
   }
   return items;

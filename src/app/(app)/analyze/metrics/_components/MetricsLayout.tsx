@@ -19,7 +19,7 @@ const DEV_EXTRA_VIEWS = [
   "deliveries-control",
 ] as const;
 
-export const VIEWS = (FLAGS.enableMetrics
+export const VIEWS = (FLAGS.metricsDevOnly
   ? ([...PROD_VIEWS, ...DEV_EXTRA_VIEWS] as const)
   : PROD_VIEWS) as readonly string[];
 

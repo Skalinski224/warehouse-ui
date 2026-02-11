@@ -1,4 +1,6 @@
+// src/lib/flags.ts
 export const FLAGS = {
-    metricsDevOnly: process.env.NEXT_PUBLIC_ENABLE_METRICS === "1",
+    // metryki tylko lokalnie/dev (na Vercel PROD będą OFF)
+    metricsDevOnly: process.env.NODE_ENV !== "production",
   } as const;
   
