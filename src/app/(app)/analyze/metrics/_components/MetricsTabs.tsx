@@ -1,19 +1,9 @@
-// src/app/(app)/analyze/metrics/_components/MetricsTabs.tsx
-// Client — lewy panel nawigacji (tabs)
-// - większość zakładek sterowana URL param: ?view=...
-// - "Projekt vs Rzeczywistość" na razie prowadzi do osobnej strony: /analyze/plan-vs-reality
-
 "use client";
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-
-type ViewKey =
-  | "project"
-  | "usage"
-  | "anomalies"
-  | "inventory-health"
-  | "deliveries-control";
+import type { ViewKey } from "./metrics.types";
+import { VIEWS } from "./metrics.types";
 
 type Tab =
   | {
@@ -31,7 +21,7 @@ type Tab =
       icon: string;
     };
 
-const TABS: Tab[] = [
+const INTERNAL_TABS: Array<Extract<Tab, { kind: "internal" }>> = [
   {
     kind: "internal",
     key: "project",
@@ -39,16 +29,6 @@ const TABS: Tab[] = [
     desc: "Werdykt + dlaczego",
     icon: "🛰️",
   },
-
-  // ✅ NOWE: na razie osobna strona/route
-  {
-    kind: "route",
-    href: "/analyze/plan-vs-reality",
-    label: "Projekt vs Rzeczywistość",
-    desc: "Plan vs real (rodziny materiałów)",
-    icon: "📐",
-  },
-
   {
     kind: "internal",
     key: "usage",
@@ -79,6 +59,22 @@ const TABS: Tab[] = [
   },
 ];
 
+const ROUTE_TABS: Array<Extract<Tab, { kind: "route" }>> = [
+  {
+    kind: "route",
+    href: "/analyze/plan-vs-reality",
+    label: "Projekt vs Rzeczywistość",
+    desc: "Plan vs real (rodziny materiałów)",
+    icon: "📐",
+  },
+];
+
+// filtrujemy internal taby zgodnie z VIEWS (prod/dev)
+const TABS: Tab[] = [
+  ...INTERNAL_TABS.filter((t) => (VIEWS as readonly string[]).includes(t.key)),
+  ...ROUTE_TABS,
+];
+
 function cx(...c: Array<string | false | null | undefined>) {
   return c.filter(Boolean).join(" ");
 }
@@ -87,7 +83,6 @@ function buildHref(params: URLSearchParams, view: ViewKey) {
   const next = new URLSearchParams(params);
   next.set("view", view);
 
-  // porządki: jeśli ktoś ma pusty place/from/to — nie taszczymy śmieci
   for (const k of ["from", "to", "place"]) {
     const v = next.get(k);
     if (!v || !v.trim()) next.delete(k);
@@ -103,13 +98,10 @@ export default function MetricsTabs({ activeView }: { activeView: ViewKey }) {
   return (
     <nav className="space-y-2">
       {TABS.map((t) => {
-        const isActive =
-          t.kind === "internal" ? t.key === activeView : false;
+        const isActive = t.kind === "internal" ? t.key === activeView : false;
 
         const href =
-          t.kind === "internal"
-            ? buildHref(current, t.key)
-            : t.href;
+          t.kind === "internal" ? buildHref(current, t.key) : t.href;
 
         return (
           <Link
@@ -160,13 +152,10 @@ export default function MetricsTabs({ activeView }: { activeView: ViewKey }) {
                   )}
                 </div>
 
-                <p className="truncate text-xs text-muted-foreground">
-                  {t.desc}
-                </p>
+                <p className="truncate text-xs text-muted-foreground">{t.desc}</p>
               </div>
             </div>
 
-            {/* “Kosmiczny” akcent: subtelna linia sygnału */}
             <div className="mt-2 h-[2px] w-full overflow-hidden rounded-full bg-border">
               <div
                 className={cx(

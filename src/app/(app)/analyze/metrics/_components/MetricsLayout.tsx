@@ -4,26 +4,7 @@ import type { ReactNode } from "react";
 import FiltersBar from "./FiltersBar";
 import MetricsTabs from "./MetricsTabs";
 import { FLAGS } from "@/lib/flags";
-
-// ✅ stabilny zestaw na produkcję
-const PROD_VIEWS = [
-  "project",
-  "usage",
-] as const;
-
-// ✅ dodatkowe widoki tylko lokalnie (dev)
-const DEV_EXTRA_VIEWS = [
-  "plan-vs-reality",
-  "anomalies",
-  "inventory-health",
-  "deliveries-control",
-] as const;
-
-export const VIEWS = (FLAGS.metricsDevOnly
-  ? ([...PROD_VIEWS, ...DEV_EXTRA_VIEWS] as const)
-  : PROD_VIEWS) as readonly string[];
-
-export type ViewKey = (typeof VIEWS)[number];
+import type { ViewKey } from "./metrics.types";
 
 type Props = {
   title: string;
@@ -48,6 +29,7 @@ export default function MetricsLayout({
 }: Props) {
   return (
     <div className="space-y-4">
+      {/* Top bar */}
       <div className="card p-3">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="space-y-1">
@@ -57,6 +39,7 @@ export default function MetricsLayout({
                 Mission Control
               </span>
             </div>
+
             {subtitle ? (
               <p className="text-xs text-muted-foreground">{subtitle}</p>
             ) : (
@@ -70,6 +53,7 @@ export default function MetricsLayout({
         </div>
       </div>
 
+      {/* Main */}
       <div className="grid gap-4 lg:grid-cols-[280px_1fr]">
         <aside className="space-y-3">
           <div className="card p-3">
@@ -77,8 +61,9 @@ export default function MetricsLayout({
               <p className="text-xs font-semibold text-muted-foreground">
                 Widoki analityczne
               </p>
+
               <span className="text-[11px] text-muted-foreground">
-                {FLAGS.enableMetrics ? "dev" : "prod"}
+                {FLAGS.metricsDevOnly ? "dev" : "prod"}
               </span>
             </div>
 

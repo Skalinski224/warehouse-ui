@@ -1,18 +1,8 @@
-// src/app/(app)/analyze/metrics/_components/FiltersBar.tsx
-// Client — filtry sterowane URL (bez “state-harvest chaosu”)
-// from/to/place zapisujemy do query params; view zostaje bez zmian.
-
 "use client";
 
 import { useEffect, useMemo, useState, useTransition } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-
-type ViewKey =
-  | "project"
-  | "usage"
-  | "anomalies"
-  | "inventory-health"
-  | "deliveries-control";
+import type { ViewKey } from "./metrics.types";
 
 type Props = {
   view: ViewKey;
@@ -30,7 +20,6 @@ function isISODate(s: string) {
 }
 
 function clampDate(v: string) {
-  // input date daje ISO, ale trzymamy walidację “twardą”
   return isISODate(v) ? v : "";
 }
 
@@ -51,7 +40,6 @@ export default function FiltersBar({ view, from, to, place }: Props) {
 
   const baseParams = useMemo(() => {
     const p = new URLSearchParams(sp?.toString() ?? "");
-    // gwarantujemy, że view jest zawsze obecne (żeby tabs działały)
     p.set("view", view);
     return p;
   }, [sp, view]);
@@ -61,18 +49,9 @@ export default function FiltersBar({ view, from, to, place }: Props) {
   const [placeLocal, setPlaceLocal] = useState(place ?? "");
   const [isPending, startTransition] = useTransition();
 
-  // ✅ KLUCZOWE: sync lokalnych inputów z propsami/URL (back/forward, taby, itp.)
-  useEffect(() => {
-    setFromLocal(from ?? "");
-  }, [from]);
-
-  useEffect(() => {
-    setToLocal(to ?? "");
-  }, [to]);
-
-  useEffect(() => {
-    setPlaceLocal(place ?? "");
-  }, [place]);
+  useEffect(() => setFromLocal(from ?? ""), [from]);
+  useEffect(() => setToLocal(to ?? ""), [to]);
+  useEffect(() => setPlaceLocal(place ?? ""), [place]);
 
   const apply = (next: { from?: string; to?: string; place?: string }) => {
     const p = new URLSearchParams(baseParams);
@@ -94,7 +73,6 @@ export default function FiltersBar({ view, from, to, place }: Props) {
     if (pl2) p.set("place", pl2);
     else p.delete("place");
 
-    // jeśli ktoś odwróci zakres (from > to), zamieniamy w locie
     const fFinal = p.get("from");
     const tFinal = p.get("to");
     if (fFinal && tFinal && fFinal > tFinal) {
@@ -110,7 +88,6 @@ export default function FiltersBar({ view, from, to, place }: Props) {
   };
 
   const quickRange = (days: number) => {
-    // prosto, bez library: liczymy w JS i zapisujemy w ISO
     const now = new Date();
     const toD = new Date(
       Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
@@ -148,7 +125,6 @@ export default function FiltersBar({ view, from, to, place }: Props) {
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {/* Range */}
       <div className="flex items-center gap-2 rounded-2xl border border-border bg-background/20 p-2">
         <div className="flex items-center gap-2">
           <span className="text-[11px] text-muted-foreground">Od</span>
@@ -195,7 +171,6 @@ export default function FiltersBar({ view, from, to, place }: Props) {
         </button>
       </div>
 
-      {/* Place */}
       <div className="flex items-center gap-2 rounded-2xl border border-border bg-background/20 p-2">
         <span className="text-[11px] text-muted-foreground">Miejsce</span>
         <input
@@ -214,7 +189,6 @@ export default function FiltersBar({ view, from, to, place }: Props) {
         />
       </div>
 
-      {/* Quick ranges */}
       <div className="flex items-center gap-1 rounded-2xl border border-border bg-background/20 p-2">
         <span className="mr-1 text-[11px] text-muted-foreground">Szybko</span>
         <button
@@ -243,7 +217,6 @@ export default function FiltersBar({ view, from, to, place }: Props) {
         </button>
       </div>
 
-      {/* Reset */}
       <button
         type="button"
         onClick={reset}
@@ -258,7 +231,6 @@ export default function FiltersBar({ view, from, to, place }: Props) {
         Reset
       </button>
 
-      {/* Tiny “telemetry” chip */}
       <span className="ml-1 inline-flex items-center gap-2 rounded-full border border-border bg-background/20 px-3 py-1 text-[11px] text-muted-foreground">
         <span
           className={cx(
