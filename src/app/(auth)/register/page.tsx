@@ -3,7 +3,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
 
 function safeExpiresAt(expires_at: number | null | undefined) {
@@ -78,7 +78,7 @@ function passwordStrength(pw: string): { level: Strength; label: string; pct: nu
   return { level: "weak", label: "Słabe", pct: 33 };
 }
 
-export default function RegisterPage() {
+function RegisterPageInner() {
   const router = useRouter();
   const qp = useSearchParams();
   const redirect = qp.get("redirect") ?? "/";
@@ -330,9 +330,7 @@ export default function RegisterPage() {
                 <div className="pt-2">
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-foreground/60">Siła hasła</span>
-                    <span className={["font-semibold", strengthTextClass].join(" ")}>
-                      {strength.label}
-                    </span>
+                    <span className={["font-semibold", strengthTextClass].join(" ")}>{strength.label}</span>
                   </div>
 
                   <div className={["mt-2 h-2 rounded-full overflow-hidden", barBgClass].join(" ")}>
@@ -364,5 +362,13 @@ export default function RegisterPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+export default function RegisterPage() {
+  return (
+    <Suspense fallback={null}>
+      <RegisterPageInner />
+    </Suspense>
   );
 }

@@ -3,7 +3,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
 
 function safeExpiresAt(expires_at: number | null | undefined) {
@@ -35,7 +35,7 @@ async function syncSession(
   }
 }
 
-export default function LoginPage() {
+function LoginPageInner() {
   const router = useRouter();
   const qp = useSearchParams();
   const redirect = qp.get("redirect") ?? qp.get("next") ?? "/";
@@ -117,9 +117,7 @@ export default function LoginPage() {
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "github",
       options: {
-        redirectTo: `${window.location.origin}/auth/callback?redirect=${encodeURIComponent(
-          redirect
-        )}`,
+        redirectTo: `${window.location.origin}/auth/callback?redirect=${encodeURIComponent(redirect)}`,
       },
     });
     if (error) alert(error.message);
@@ -206,8 +204,8 @@ export default function LoginPage() {
           </button>
 
           <div className="text-xs text-foreground/60 leading-relaxed">
-            Jeśli konto wymaga zmiany hasła, po zalogowaniu zostaniesz przeniesiony na stronę
-            ustawienia hasła.
+            Jeśli konto wymaga zmiany hasła, po zalogowaniu zostaniesz przeniesiony na stronę ustawienia
+            hasła.
           </div>
         </div>
 
@@ -222,5 +220,13 @@ export default function LoginPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={null}>
+      <LoginPageInner />
+    </Suspense>
   );
 }

@@ -1,7 +1,7 @@
 // src/app/(auth)/set-password/page.tsx
 "use client";
 
-import { useMemo, useState } from "react";
+import { Suspense, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
 
@@ -34,7 +34,7 @@ async function syncSession(
 
 const PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
 
-export default function SetPasswordPage() {
+function SetPasswordPageInner() {
   const qp = useSearchParams();
   const next = qp.get("next") ?? "/";
 
@@ -136,11 +136,17 @@ export default function SetPasswordPage() {
             {busy ? "Ustawiam…" : "Ustaw hasło"}
           </button>
 
-          <div className="text-[11px] text-muted-foreground leading-relaxed">
-            Po zmianie hasła wrócisz do aplikacji.
-          </div>
+          <div className="text-[11px] text-muted-foreground leading-relaxed">Po zmianie hasła wrócisz do aplikacji.</div>
         </div>
       </div>
     </main>
+  );
+}
+
+export default function SetPasswordPage() {
+  return (
+    <Suspense fallback={null}>
+      <SetPasswordPageInner />
+    </Suspense>
   );
 }
