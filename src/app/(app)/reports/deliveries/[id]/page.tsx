@@ -5,7 +5,8 @@ import { supabaseServer } from "@/lib/supabaseServer";
 import { getInvoiceSignedUrl } from "@/lib/uploads/invoices";
 import { getPermissionSnapshot } from "@/lib/currentUser";
 import { can, PERM } from "@/lib/permissions";
-import BackButton from "@/components/BackButton";
+
+import DeliveryInvoicesOverlay from "@/components/DeliveryInvoicesOverlay";
 
 type DeliveryRow = {
   id: string;
@@ -16,11 +17,15 @@ type DeliveryRow = {
   supplier: string | null;
   delivery_cost: number | null;
   materials_cost: number | null;
-  invoice_url: string | null; // PATH w buckecie invoices
+  invoice_url: string | null; // PATH w buckecie invoices (legacy / single)
   items: any[] | null; // JSONB z pozycjami dostawy
   approved: boolean | null;
 
   deleted_at?: string | null;
+
+  // ✅ magazynowa lokalizacja (jak daily)
+  inventory_location_id?: string | null;
+  inventory_locations?: { label?: string | null } | null;
 
   // PŁATNOŚĆ – dane z tabeli
   is_paid: boolean | null;
@@ -44,12 +49,22 @@ type UiItem = {
   value: number;
 };
 
-function Tag({
+/* ------------------------------------------------------------------ */
+/* UI helpers (KANON: jak daily)                                       */
+/* ------------------------------------------------------------------ */
+
+function cx(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
+
+function Badge({
   children,
   tone = "neutral",
+  className,
 }: {
   children: React.ReactNode;
   tone?: "neutral" | "ok" | "warn" | "bad";
+  className?: string;
 }) {
   const cls =
     tone === "ok"
@@ -61,37 +76,42 @@ function Tag({
       : "border-border bg-background/40 text-foreground/80";
 
   return (
-    <span className={`text-[10px] px-2 py-0.5 rounded border ${cls}`}>
+    <span
+      className={cx(
+        "text-[11px] px-2 py-1 rounded-full border whitespace-nowrap leading-none",
+        cls,
+        className
+      )}
+    >
       {children}
     </span>
   );
 }
 
-function Pill({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <span className="text-[11px] px-2 py-1 rounded bg-background/60 border border-border">
-      <span className="opacity-70">{label}:</span>{" "}
-      <span className="font-semibold opacity-100">{value}</span>
-    </span>
-  );
-}
-
-function KV({
+function Field({
   label,
   value,
-  tone,
+  strong,
 }: {
   label: string;
   value: React.ReactNode;
-  tone?: "neutral" | "ok" | "warn" | "bad";
+  strong?: boolean;
 }) {
   return (
-    <div className="flex items-center gap-2 flex-wrap">
-      <Tag tone={tone}>{label}</Tag>
-      <div className="text-sm">{value}</div>
+    <div className="min-w-0">
+      <div className="text-[11px] uppercase tracking-wide text-muted-foreground/90">
+        {label}
+      </div>
+      <div className={cx("text-[15px] leading-snug", strong && "font-semibold")}>
+        {value}
+      </div>
     </div>
   );
 }
+
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
 
 const paymentLabel = (d: DeliveryRow): { text: string; tone: "ok" | "warn" | "bad" } => {
   if (d.is_paid) return { text: "opłacona", tone: "ok" };
@@ -150,11 +170,17 @@ function fmtDateTime(iso: string | null): string {
   });
 }
 
-export default async function Page({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
+function statusMeta(approved: boolean | null) {
+  return approved
+    ? { text: "zatwierdzona", tone: "ok" as const }
+    : { text: "oczekująca", tone: "warn" as const };
+}
+
+/* ------------------------------------------------------------------ */
+/* Page                                                                */
+/* ------------------------------------------------------------------ */
+
+export default async function Page({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
 
   const snap = await getPermissionSnapshot();
@@ -174,24 +200,28 @@ export default async function Page({
   const { data: rawDelivery, error: dErr } = await supabase
     .from("deliveries")
     .select(
-      [
-        "id",
-        "date",
-        "created_at",
-        "person",
-        "place_label",
-        "supplier",
-        "delivery_cost",
-        "materials_cost",
-        "invoice_url",
-        "items",
-        "approved",
-        "deleted_at",
-        "is_paid",
-        "payment_due_date",
-        "paid_at",
-        "paid_by",
-      ].join(", ")
+      `
+      id,
+      date,
+      created_at,
+      person,
+      place_label,
+      supplier,
+      delivery_cost,
+      materials_cost,
+      invoice_url,
+      items,
+      approved,
+      deleted_at,
+
+      is_paid,
+      payment_due_date,
+      paid_at,
+      paid_by,
+
+      inventory_location_id,
+      inventory_locations:inventory_location_id ( label )
+    `
     )
     .eq("id", id)
     .maybeSingle();
@@ -203,9 +233,6 @@ export default async function Page({
         <p className="text-xs opacity-70">
           Sprawdź, czy adres jest poprawny lub wróć do listy dostaw.
         </p>
-        <div>
-          <BackButton className="px-3 py-2 rounded border border-border bg-card hover:bg-card/80 text-xs transition" />
-        </div>
       </main>
     );
   }
@@ -242,11 +269,7 @@ export default async function Page({
   const rawItems: any[] = Array.isArray(d.items) ? d.items : [];
 
   const materialIds = Array.from(
-    new Set(
-      rawItems
-        .map((it) => it.material_id as string | undefined)
-        .filter(Boolean) as string[]
-    )
+    new Set(rawItems.map((it) => it.material_id as string | undefined).filter(Boolean) as string[])
   );
 
   let materialsById: Record<string, { title: string; unit: string | null }> = {};
@@ -275,8 +298,7 @@ export default async function Page({
     const materialId: string | null = it.material_id ?? null;
     const metaMat = materialId ? materialsById[materialId] : undefined;
 
-    const materialTitle =
-      metaMat?.title ?? materialId ?? "Nieznany materiał (brak w katalogu)";
+    const materialTitle = metaMat?.title ?? materialId ?? "Nieznany materiał (brak w katalogu)";
     const unit = metaMat?.unit ?? null;
 
     return {
@@ -304,7 +326,7 @@ export default async function Page({
     maximumFractionDigits: 2,
   });
 
-  // Faktura
+  // Legacy: pojedynczy plik (fallback)
   let invoiceHref: string | null = null;
   if (canInvoices && d.invoice_url) {
     try {
@@ -322,12 +344,13 @@ export default async function Page({
   const dueDateLabel = d.payment_due_date ? fmtDateOnly(d.payment_due_date) : "brak";
   const days = typeof d.days_to_due === "number" ? d.days_to_due : null;
 
-  const approvedText = d.approved ? "zatwierdzona" : "oczekująca";
-  const approvedTone: "ok" | "warn" = d.approved ? "ok" : "warn";
+  const st = statusMeta(d.approved);
 
-  const placeLabel = d.place_label || "brak miejsca";
-  const supplierLabel = d.supplier || "nie podano";
-  const personLabel = d.person || "nie podano";
+  const placeLabel = d.place_label || "—";
+  const supplierLabel = d.supplier || "—";
+  const personLabel = d.person || "—";
+
+  const inventoryLocationLabel = (d.inventory_locations?.label ?? null) || "—";
 
   const paymentHint =
     d.is_paid
@@ -341,145 +364,142 @@ export default async function Page({
       : `za ${days} dni`;
 
   return (
-    <main className="p-6 space-y-4">
-      {/* HEADER (kanon) */}
-      <header className="flex flex-wrap items-start justify-between gap-3">
+    <main className="space-y-4">
+      {/* HEADER (KANON: jak daily) */}
+      <header className="flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0">
-          <h1 className="text-sm font-medium">Raport: dostawa</h1>
+          <h1 className="text-base font-semibold">Dostawa</h1>
           <p className="text-xs opacity-70">
-            Szczegóły dostawy — pozycje, koszty, faktura, status magazynu i płatności.
+            Szczegóły dostawy — pozycje, koszty, dokumenty oraz status magazynu i płatności.
           </p>
         </div>
 
         <div className="flex items-center gap-2">
-          <Pill label="ID" value={`#${d.id.slice(0, 8)}`} />
-          <BackButton className="px-3 py-2 rounded border border-border bg-card hover:bg-card/80 text-xs transition" />
+          <Badge className="px-3" tone={st.tone}>
+            {st.text}
+          </Badge>
+          <Badge className="px-3">ID #{String(d.id).slice(0, 8)}</Badge>
         </div>
       </header>
 
-      {/* META BAR (na tacy: etykieta → wartość) */}
-      <section className="rounded-2xl border border-border bg-card p-4 space-y-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <Pill label="DATA" value={dateLabel} />
-          <Pill label="MIEJSCE" value={placeLabel} />
-          <Pill label="DOSTAWCA" value={supplierLabel} />
-          <Pill label="ZGŁASZAJĄCY" value={personLabel} />
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="inline-flex items-center gap-2">
-            <Tag>STATUS MAGAZYNU</Tag>
-            <Tag tone={approvedTone}>{approvedText}</Tag>
-          </span>
-
-          <span className="inline-flex items-center gap-2">
-            <Tag>STATUS PŁATNOŚCI</Tag>
-            <Tag tone={pay.tone}>{pay.text}</Tag>
-            {paymentHint ? (
-              <span className="text-xs opacity-70">({paymentHint})</span>
-            ) : null}
-          </span>
-
-          <Pill label="POZYCJI" value={uiItems.length} />
-        </div>
-      </section>
-
-      {/* GRID: lewa (płatność + koszty + faktura) / prawa (pozycje) */}
-      <section className="grid gap-4 lg:grid-cols-2">
-        {/* LEWA */}
+      {/* MAIN GRID: LEFT (meta+payment+cost+docs) / RIGHT (items) */}
+      <section className="grid gap-4 lg:grid-cols-2 items-start">
+        {/* LEFT */}
         <div className="space-y-4">
+          {/* META PANEL */}
+          <section className="rounded-2xl border border-border bg-card p-4">
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="text-sm font-medium">Podstawowe informacje</div>
+                <div className="flex items-center gap-2">
+                  <Badge tone={st.tone}>{st.text}</Badge>
+                  <Badge tone={pay.tone}>{pay.text}</Badge>
+                  {paymentHint ? <span className="text-xs opacity-70">({paymentHint})</span> : null}
+                </div>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Data" value={dateLabel} strong />
+                <Field label="Zgłaszający" value={personLabel} strong />
+
+                <Field label="Miejsce" value={placeLabel} />
+                <Field label="Lokalizacja magazynowa" value={inventoryLocationLabel} />
+
+                <Field label="Dostawca" value={supplierLabel} />
+                <Field label="Pozycji" value={uiItems.length} />
+              </div>
+            </div>
+          </section>
+
           {/* PŁATNOŚĆ */}
-          <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
+          <section className="rounded-2xl border border-border bg-card p-4 space-y-3">
             <div className="flex items-center justify-between gap-2">
               <h2 className="text-sm font-medium">Płatność</h2>
-              <Tag tone={pay.tone}>{pay.text}</Tag>
+              <Badge tone={pay.tone}>{pay.text}</Badge>
             </div>
 
             {!d.is_paid ? (
-              <div className="space-y-2">
-                <KV label="TERMIN" value={dueDateLabel} tone={d.is_overdue ? "bad" : "neutral"} />
-                {days !== null ? (
-                  <KV
-                    label="ODLICZANIE"
-                    value={
-                      days < 0
-                        ? `po terminie o ${Math.abs(days)} dni`
-                        : days === 0
-                        ? "termin dzisiaj"
-                        : `do terminu zostało ${days} dni`
-                    }
-                    tone={days < 0 ? "bad" : "warn"}
-                  />
-                ) : null}
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Termin" value={dueDateLabel} strong />
+                <Field
+                  label="Status"
+                  value={
+                    days === null
+                      ? "—"
+                      : days < 0
+                      ? `po terminie o ${Math.abs(days)} dni`
+                      : days === 0
+                      ? "termin dzisiaj"
+                      : `do terminu zostało ${days} dni`
+                  }
+                  strong
+                />
               </div>
             ) : (
-              <div className="space-y-2">
-                <KV label="OPŁACONA" value={fmtDateTime(d.paid_at)} tone="ok" />
-                <KV label="KTO OZNACZYŁ" value={paidByName ?? "brak danych"} />
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Opłacona" value={fmtDateTime(d.paid_at)} strong />
+                <Field label="Kto oznaczył" value={paidByName ?? "—"} />
               </div>
             )}
-          </div>
+          </section>
 
           {/* KOSZTY */}
-          <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
+          <section className="rounded-2xl border border-border bg-card p-4 space-y-3">
             <h2 className="text-sm font-medium">Koszty</h2>
 
-            <div className="space-y-2">
-              <KV label="MATERIAŁY" value={money.format(materialsCost)} />
-              <KV label="DOSTAWA" value={money.format(deliveryCost)} />
-              <KV
-                label="RAZEM"
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="Materiały" value={money.format(materialsCost)} strong />
+              <Field label="Dostawa" value={money.format(deliveryCost)} strong />
+              <Field
+                label="Razem"
                 value={<span className="font-semibold">{money.format(grand)}</span>}
+                strong
               />
+              <Field label="Suma pozycji" value={money.format(itemsTotal)} />
             </div>
-          </div>
+          </section>
 
-          {/* FAKTURA */}
-          <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
-            <h2 className="text-sm font-medium">Dokument</h2>
+          {/* DOKUMENTY */}
+          <section className="rounded-2xl border border-border bg-card p-4 space-y-3">
+            <h2 className="text-sm font-medium">Dokumenty</h2>
 
-            {!d.invoice_url ? (
-              <KV label="FAKTURA" value={<span className="opacity-70">brak pliku</span>} />
-            ) : !canInvoices ? (
-              <KV
-                label="FAKTURA"
-                value={<span className="opacity-70">brak dostępu do dokumentu</span>}
-                tone="warn"
-              />
-            ) : invoiceHref ? (
-              <KV
-                label="FAKTURA"
-                value={
+            {!canInvoices ? (
+              <div className="text-sm opacity-70">Brak dostępu do dokumentów.</div>
+            ) : (
+              <div className="flex items-center gap-2 flex-wrap">
+                <DeliveryInvoicesOverlay
+                  deliveryId={d.id}
+                  triggerLabel="Otwórz dokumenty"
+                  triggerClassName="px-3 py-2 rounded border border-border bg-card hover:bg-card/80 text-sm transition"
+                />
+
+                {d.invoice_url && invoiceHref ? (
                   <a
                     href={invoiceHref}
                     target="_blank"
                     rel="noreferrer"
-                    className="underline underline-offset-2 opacity-90 hover:opacity-100"
+                    className="px-3 py-2 rounded border border-border bg-background/40 hover:bg-background/60 text-sm transition"
                   >
-                    otwórz w nowej karcie
+                    Legacy: otwórz w nowej karcie
                   </a>
-                }
-                tone="ok"
-              />
-            ) : (
-              <KV
-                label="FAKTURA"
-                value={
-                  <span className="opacity-70">
-                    nie udało się wygenerować linku (spróbuj później)
-                  </span>
-                }
-                tone="warn"
-              />
+                ) : null}
+
+                {!d.invoice_url ? (
+                  <span className="text-xs opacity-70">Brak plików przypiętych do dostawy.</span>
+                ) : null}
+              </div>
             )}
-          </div>
+          </section>
         </div>
 
-        {/* PRAWA: POZYCJE */}
-        <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
-          <div className="flex items-center justify-between gap-2">
-            <h2 className="text-sm font-medium">Pozycje</h2>
-            <Pill label="SUMA POZYCJI" value={money.format(itemsTotal)} />
+        {/* RIGHT: ITEMS */}
+        <section className="rounded-2xl border border-border bg-card p-4 space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h2 className="text-sm font-medium">Pozycje</h2>
+              <div className="text-xs opacity-70">Pozycje: {uiItems.length}</div>
+            </div>
+            <Badge>{money.format(itemsTotal)}</Badge>
           </div>
 
           <div className="hidden sm:grid grid-cols-12 gap-2 text-[11px] uppercase tracking-wide opacity-70 px-3">
@@ -497,11 +517,6 @@ export default async function Page({
                 <div className="grid grid-cols-12 gap-2 items-start">
                   <div className="col-span-12 sm:col-span-6 min-w-0">
                     <div className="font-medium truncate">{it.materialTitle}</div>
-                    {it.materialId ? (
-                      <div className="font-mono text-[10px] opacity-60 truncate">
-                        {it.materialId}
-                      </div>
-                    ) : null}
                   </div>
 
                   <div className="col-span-6 sm:col-span-2 text-right whitespace-nowrap">
@@ -546,11 +561,7 @@ export default async function Page({
               </div>
             ) : null}
           </div>
-
-          <div className="pt-2 border-t border-border/70 text-xs opacity-70">
-            Jeśli materiał jest w katalogu — kliknij w pozycję, żeby wejść w kartę materiału.
-          </div>
-        </div>
+        </section>
       </section>
     </main>
   );

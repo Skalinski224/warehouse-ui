@@ -37,7 +37,7 @@ export default async function DesignerPlanPage() {
       q: "",
       sort: "title",
       dir: "asc",
-      include_deleted: false,
+      // include_deleted: false, // ❌ nie ma w typie fetchMaterials()
       limit: 1000,
       offset: 0,
     }),

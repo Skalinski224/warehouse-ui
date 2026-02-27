@@ -7,7 +7,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 
 import ApproveButton from "@/components/ApproveButton";
 import RoleGuard from "@/components/RoleGuard";
-import BackButton from "@/components/BackButton";
+import DeliveryInvoicesOverlay from "@/components/DeliveryInvoicesOverlay";
 
 import { approveDelivery, markDeliveryPaid } from "@/lib/actions";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
@@ -24,7 +24,9 @@ type Row = {
   approved: boolean | null;
   deleted_at: string | null;
 
-  // PŁATNOŚĆ
+  inventory_location_id: string | null;
+  inventory_location_label: string | null;
+
   is_paid: boolean | null;
   payment_due_date: string | null;
   payment_status: string | null;
@@ -38,52 +40,56 @@ type StatusFilter = "all" | "pending" | "approved";
 
 /* ---------------------------------- UI HELPERS --------------------------------- */
 
-function Tag({
+function cls(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
+
+function Pill({
   children,
   tone = "neutral",
+  className,
 }: {
   children: React.ReactNode;
   tone?: "neutral" | "ok" | "warn" | "bad";
+  className?: string;
 }) {
-  const cls =
+  const base =
+    "inline-flex items-center gap-1 text-[12px] leading-none px-2.5 py-1 rounded-full border whitespace-nowrap";
+  const toneCls =
     tone === "ok"
       ? "border-emerald-500/40 bg-emerald-600/10 text-emerald-200"
       : tone === "warn"
       ? "border-amber-500/40 bg-amber-600/10 text-amber-200"
       : tone === "bad"
       ? "border-red-500/40 bg-red-600/10 text-red-200"
-      : "border-border bg-background/40 text-foreground/80";
+      : "border-border bg-background/30 text-foreground/80";
 
-  return (
-    <span className={`text-[10px] px-2 py-0.5 rounded border ${cls}`}>
-      {children}
-    </span>
-  );
+  return <span className={cls(base, toneCls, className)}>{children}</span>;
 }
 
-function KV({
+function Kpi({
   label,
   value,
-  strong = false,
+  tone = "neutral",
 }: {
   label: string;
   value: React.ReactNode;
-  strong?: boolean;
+  tone?: "neutral" | "ok" | "warn" | "bad";
 }) {
-  return (
-    <div className="flex items-center gap-2 flex-wrap">
-      <Tag>{label}</Tag>
-      <span className={strong ? "text-sm font-medium" : "text-sm"}>{value}</span>
-    </div>
-  );
-}
+  const toneCls =
+    tone === "ok"
+      ? "bg-emerald-600/10 border-emerald-500/30"
+      : tone === "warn"
+      ? "bg-amber-600/10 border-amber-500/30"
+      : tone === "bad"
+      ? "bg-red-600/10 border-red-500/30"
+      : "bg-background/20 border-border";
 
-function MiniKV({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <span className="text-[11px] px-2 py-1 rounded bg-background/60 border border-border">
-      <span className="opacity-70">{label}:</span>{" "}
-      <span className="font-semibold">{value}</span>
-    </span>
+    <div className={cls("rounded-xl border px-3 py-2", toneCls)}>
+      <div className="text-[11px] opacity-70">{label}</div>
+      <div className="text-sm font-semibold leading-tight">{value}</div>
+    </div>
   );
 }
 
@@ -100,13 +106,6 @@ function toNum(v: number | string | null): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function toInt(v: number | string | null): number | null {
-  if (v == null) return null;
-  if (typeof v === "number") return Number.isFinite(v) ? Math.trunc(v) : null;
-  const n = parseInt(String(v), 10);
-  return Number.isFinite(n) ? n : null;
-}
-
 function fmtDate(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -114,18 +113,27 @@ function fmtDate(iso: string | null): string {
   return d.toLocaleDateString("pl-PL");
 }
 
-function paymentLabel(r: Row): { text: string; tone: "neutral" | "ok" | "warn" | "bad" } {
-  if (r.deleted_at) return { text: "usunięta", tone: "neutral" };
-  if (r.is_paid) return { text: "opłacona", tone: "ok" };
-  if (r.is_overdue) return { text: "po terminie", tone: "bad" };
-  if (!r.payment_due_date) return { text: "nieopłacona (bez terminu)", tone: "warn" };
-  return { text: "do zapłaty", tone: "warn" };
+function paymentTone(r: Row): "neutral" | "ok" | "warn" | "bad" {
+  if (r.deleted_at) return "neutral";
+  if (r.is_paid) return "ok";
+  if (r.is_overdue) return "bad";
+  return "warn";
+}
+
+function paymentText(r: Row): string {
+  if (r.deleted_at) return "Usunięta";
+  return r.is_paid ? "Opłacona" : "Nieopłacona";
+}
+
+function approveText(r: Row): string {
+  return r.approved ? "Zatwierdzona" : "Oczekuje";
 }
 
 async function fetchRows(params: {
   from?: string;
   to?: string;
   person?: string;
+  inventory_location?: string;
   status?: StatusFilter;
   q?: string;
 }): Promise<{ rows: Row[]; error: string | null }> {
@@ -144,6 +152,8 @@ async function fetchRows(params: {
         "materials_cost",
         "approved",
         "deleted_at",
+        "inventory_location_id",
+        "inventory_location_label",
         "is_paid",
         "payment_due_date",
         "payment_status",
@@ -159,6 +169,11 @@ async function fetchRows(params: {
   if (params.from) q = q.gte("date", params.from);
   if (params.to) q = q.lte("date", params.to);
 
+  if (params.inventory_location && params.inventory_location.trim()) {
+    const s = params.inventory_location.trim();
+    q = q.ilike("inventory_location_label", `%${s}%`);
+  }
+
   if (params.person && params.person.trim()) {
     const p = params.person.trim();
     q = q.ilike("person", `%${p}%`);
@@ -172,7 +187,14 @@ async function fetchRows(params: {
     if (isLikelyId(s)) {
       q = q.eq("id", s);
     } else {
-      q = q.or(`person.ilike.%${s}%,place_label.ilike.%${s}%,supplier.ilike.%${s}%`);
+      q = q.or(
+        [
+          `person.ilike.%${s}%`,
+          `inventory_location_label.ilike.%${s}%`,
+          `place_label.ilike.%${s}%`,
+          `supplier.ilike.%${s}%`,
+        ].join(",")
+      );
     }
   }
 
@@ -189,6 +211,7 @@ function mkUrl(params: {
   from: string;
   to: string;
   person: string;
+  inventory_location: string;
   status: StatusFilter;
   q: string;
 }) {
@@ -196,6 +219,7 @@ function mkUrl(params: {
   if (params.from.trim()) p.set("from", params.from.trim());
   if (params.to.trim()) p.set("to", params.to.trim());
   if (params.person.trim()) p.set("person", params.person.trim());
+  if (params.inventory_location.trim()) p.set("loc", params.inventory_location.trim());
   if (params.status && params.status !== "all") p.set("status", params.status);
   if (params.q.trim()) p.set("q", params.q.trim());
   const qs = p.toString();
@@ -215,6 +239,7 @@ function DeliveriesReportInner() {
       from: get("from"),
       to: get("to"),
       person: get("person"),
+      inventory_location: get("loc"),
       status: (status === "pending" || status === "approved" || status === "all"
         ? status
         : "all") as StatusFilter,
@@ -226,12 +251,33 @@ function DeliveriesReportInner() {
   const [from, setFrom] = useState(initial.from);
   const [to, setTo] = useState(initial.to);
   const [person, setPerson] = useState(initial.person);
+  const [inventoryLocation, setInventoryLocation] = useState(initial.inventory_location);
   const [status, setStatus] = useState<StatusFilter>(initial.status);
   const [query, setQuery] = useState(initial.q);
 
   const [rows, setRows] = useState<Row[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  const [filtersOpen, setFiltersOpen] = useState(false);
+
+  useEffect(() => {
+    if (!filtersOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFiltersOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [filtersOpen]);
+
+  useEffect(() => {
+    if (!filtersOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [filtersOpen]);
 
   const debounceRef = useRef<number | null>(null);
   const lastUrlRef = useRef<string>("");
@@ -240,14 +286,28 @@ function DeliveriesReportInner() {
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
 
     debounceRef.current = window.setTimeout(async () => {
-      const nextUrl = mkUrl({ from, to, person, status, q: query });
+      const nextUrl = mkUrl({
+        from,
+        to,
+        person,
+        inventory_location: inventoryLocation,
+        status,
+        q: query,
+      });
       if (lastUrlRef.current !== nextUrl) {
         lastUrlRef.current = nextUrl;
         router.replace(nextUrl, { scroll: false });
       }
 
       setLoading(true);
-      const res = await fetchRows({ from, to, person, status, q: query });
+      const res = await fetchRows({
+        from,
+        to,
+        person,
+        inventory_location: inventoryLocation,
+        status,
+        q: query,
+      });
       setRows(res.rows);
       setLoadError(res.error);
       setLoading(false);
@@ -256,12 +316,19 @@ function DeliveriesReportInner() {
     return () => {
       if (debounceRef.current) window.clearTimeout(debounceRef.current);
     };
-  }, [from, to, person, status, query, router]);
+  }, [from, to, person, inventoryLocation, status, query, router]);
 
   useEffect(() => {
     (async () => {
       setLoading(true);
-      const res = await fetchRows({ from, to, person, status, q: query });
+      const res = await fetchRows({
+        from,
+        to,
+        person,
+        inventory_location: inventoryLocation,
+        status,
+        q: query,
+      });
       setRows(res.rows);
       setLoadError(res.error);
       setLoading(false);
@@ -282,297 +349,458 @@ function DeliveriesReportInner() {
   const countApproved = useMemo(() => rows.filter((r) => !!r.approved).length, [rows]);
   const countPending = useMemo(() => rows.filter((r) => !r.approved).length, [rows]);
 
+  const btnBase =
+    "inline-flex items-center justify-center h-9 px-3 rounded-lg border text-sm transition " +
+    "focus:outline-none focus:ring-2 focus:ring-foreground/30 disabled:opacity-50 disabled:pointer-events-none";
+
+  // ✅ Dokumenty: lekko przezroczysty biały
+  const btnDocs = cls(btnBase, "border-white/20 bg-white/10 text-white hover:bg-white/15");
+
+  // ✅ Szczegóły: lekko przezroczysty zielony (bardziej subtelny niż primary)
+  const btnDetails = cls(
+    btnBase,
+    "border-emerald-500/30 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/14"
+  );
+
+  // ✅ Primary (np. Akceptuj)
+  const btnPrimary = cls(
+    btnBase,
+    "border-emerald-500/35 bg-emerald-600/15 text-emerald-200 hover:bg-emerald-600/22"
+  );
+
+  // ✅ Warn (opłać)
+  const btnWarn = cls(
+    btnBase,
+    "border-amber-500/35 bg-amber-600/15 text-amber-200 hover:bg-amber-600/22"
+  );
+
+  // ✅ Ghost
+  const btnGhost = cls(btnBase, "border-border bg-background/20 hover:bg-background/35");
+
+  const clearAll = () => {
+    setFrom("");
+    setTo("");
+    setPerson("");
+    setInventoryLocation("");
+    setStatus("all");
+    setQuery("");
+  };
+
   return (
-    <main className="p-6 space-y-4">
-      {/* HEADER (kanon) */}
+    <main className="space-y-4">
       <header className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h1 className="text-sm font-medium">Raport: dostawy</h1>
-          <p className="text-xs opacity-70">
-            Zestawienie dostaw. Filtry działają na żywo. Kliknij w pozycję, żeby wejść
-            w szczegóły.
+          <h1 className="text-base font-semibold leading-tight">Dostawy</h1>
+          <p className="text-xs opacity-70 mt-1">
+            Raport dostaw (max 100). Filtry działają na żywo — kliknij w wiersz, aby zobaczyć
+            szczegóły.
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          <MiniKV label="Wynik" value={rows.length} />
-          <MiniKV label="Zatw." value={countApproved} />
-          <MiniKV label="Oczek." value={countPending} />
-          <BackButton />
+        <div className="hidden md:grid grid-cols-3 gap-2">
+          <Kpi label="Wynik" value={loading ? "…" : rows.length} />
+          <Kpi label="Zatwierdzone" value={countApproved} tone="ok" />
+          <Kpi label="Oczekujące" value={countPending} tone="warn" />
         </div>
       </header>
 
-      {/* FILTRY (kanon) */}
-      <section className="rounded-2xl border border-border bg-card p-4 space-y-3">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="text-sm font-medium">Filtry</div>
-            <div className="text-xs opacity-70">
-              Zakres dat, osoba, status, wyszukiwanie po ID / osobie / miejscu / dostawcy.
+      <section className="rounded-2xl border border-border bg-card overflow-hidden">
+        <div className="p-3 md:p-4 border-b border-border bg-background/10">
+          <div className="flex items-center gap-2">
+            <div className="flex-1 min-w-0">
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Szukaj: osoba / lokalizacja / plac / dostawca / ID…"
+                className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm"
+              />
             </div>
-          </div>
 
-          <span className="text-[11px] px-2 py-1 rounded bg-background/60 border border-border">
-            {loading ? "Ładuję…" : "Gotowe"}
-          </span>
-        </div>
-
-        <div className="grid gap-3 md:grid-cols-6">
-          <label className="grid gap-2">
-            <span className="text-sm">Od</span>
-            <input
-              value={from}
-              onChange={(e) => setFrom(e.target.value)}
-              type="date"
-              className="h-10 w-full rounded border border-border bg-background px-3 text-sm"
-            />
-          </label>
-
-          <label className="grid gap-2">
-            <span className="text-sm">Do</span>
-            <input
-              value={to}
-              onChange={(e) => setTo(e.target.value)}
-              type="date"
-              className="h-10 w-full rounded border border-border bg-background px-3 text-sm"
-            />
-          </label>
-
-          <label className="grid gap-2 md:col-span-2">
-            <span className="text-sm">Osoba</span>
-            <input
-              value={person}
-              onChange={(e) => setPerson(e.target.value)}
-              placeholder="np. Kowalski"
-              className="h-10 w-full rounded border border-border bg-background px-3 text-sm"
-            />
-          </label>
-
-          <label className="grid gap-2">
-            <span className="text-sm">Status</span>
-            <select
-              value={status}
-              onChange={(e) => setStatus(e.target.value as StatusFilter)}
-              className="h-10 w-full rounded border border-border bg-background px-3 text-sm"
+            <button
+              type="button"
+              className={cls("md:hidden", btnGhost, "h-10")}
+              onClick={() => setFiltersOpen(true)}
             >
-              <option value="all">Wszystkie</option>
-              <option value="pending">Oczekujące</option>
-              <option value="approved">Zatwierdzone</option>
-            </select>
-          </label>
+              Filtry <span className="opacity-70">☰</span>
+            </button>
+          </div>
 
-          <label className="grid gap-2 md:col-span-2">
-            <span className="text-sm">Szukaj</span>
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="ID / nazwisko / plac / dostawca…"
-              className="h-10 w-full rounded border border-border bg-background px-3 text-sm"
-            />
-            <div className="text-[11px] opacity-70 min-h-[16px]">
-              {query.trim() ? (
-                <span>
-                  Szukam: <span className="font-medium">„{query.trim()}”</span>
-                </span>
-              ) : (
-                <span />
-              )}
+          <div className="mt-2 flex items-center justify-between text-[11px] opacity-70">
+            <span>{loading ? "Ładuję…" : `Wyników: ${rows.length} (max 100)`}</span>
+            <span className="md:hidden">
+              Zatw.: {countApproved} • Oczek.: {countPending}
+            </span>
+          </div>
+        </div>
+
+        <div className="hidden md:block p-3 md:p-4 border-b border-border bg-background/5">
+          <div className="grid gap-3 md:grid-cols-12">
+            <label className="grid gap-1 md:col-span-3">
+              <span className="text-xs opacity-70">Od</span>
+              <input
+                value={from}
+                onChange={(e) => setFrom(e.target.value)}
+                type="date"
+                className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm"
+              />
+            </label>
+
+            <label className="grid gap-1 md:col-span-3">
+              <span className="text-xs opacity-70">Do</span>
+              <input
+                value={to}
+                onChange={(e) => setTo(e.target.value)}
+                type="date"
+                className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm"
+              />
+            </label>
+
+            <label className="grid gap-1 md:col-span-2">
+              <span className="text-xs opacity-70">Status</span>
+              <select
+                value={status}
+                onChange={(e) => setStatus(e.target.value as StatusFilter)}
+                className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm"
+              >
+                <option value="all">Wszystkie</option>
+                <option value="pending">Oczekujące</option>
+                <option value="approved">Zatwierdzone</option>
+              </select>
+            </label>
+
+            <label className="grid gap-1 md:col-span-2">
+              <span className="text-xs opacity-70">Osoba</span>
+              <input
+                value={person}
+                onChange={(e) => setPerson(e.target.value)}
+                placeholder="np. Kowalski"
+                className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm"
+              />
+            </label>
+
+            <label className="grid gap-1 md:col-span-2">
+              <span className="text-xs opacity-70">Lokalizacja</span>
+              <input
+                value={inventoryLocation}
+                onChange={(e) => setInventoryLocation(e.target.value)}
+                placeholder="np. Magazyn A"
+                className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm"
+              />
+            </label>
+
+            {/* ✅ delikatnie odsunięte od lewej krawędzi */}
+            <div className="md:col-span-12 flex items-center justify-end gap-2 pt-1 pr-1">
+              <button type="button" onClick={clearAll} className={cls(btnGhost, "mr-1")}>
+                Wyczyść
+              </button>
             </div>
-          </label>
+          </div>
         </div>
 
-        <div className="flex items-center justify-between gap-3 pt-1">
-          <div className="text-xs opacity-70">
-            {loading ? "Ładuję…" : `Wyników: ${rows.length}`}
-            <span className="hidden sm:inline"> • maks. 100 rekordów</span>
-          </div>
+        <div className="p-3 md:p-4 space-y-3">
+          {loadError && (
+            <div className="rounded-2xl border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-300">
+              Błąd ładowania dostaw: {loadError}
+            </div>
+          )}
 
-          <button
-            type="button"
-            onClick={() => {
-              setFrom("");
-              setTo("");
-              setPerson("");
-              setStatus("all");
-              setQuery("");
-            }}
-            className="px-3 py-2 rounded border border-border bg-card hover:bg-card/80 text-sm transition"
-          >
-            Wyczyść
-          </button>
-        </div>
-      </section>
+          {!loadError && rows.length === 0 && !loading && (
+            <div className="rounded-2xl border border-border bg-background/20 p-4 text-sm opacity-70">
+              Brak wyników — zmień filtry.
+            </div>
+          )}
 
-      {/* LISTA */}
-      <section className="space-y-3">
-        {loadError && (
-          <div className="rounded-2xl border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-300">
-            Błąd ładowania dostaw: {loadError}
-          </div>
-        )}
+          {rows.map((r) => {
+            const materialsCost = toNum(r.materials_cost ?? 0);
+            const deliveryCost = toNum(r.delivery_cost ?? 0);
+            const total = materialsCost + deliveryCost;
 
-        {!loadError && rows.length === 0 && !loading && (
-          <div className="rounded-2xl border border-border bg-card p-4 text-sm opacity-70">
-            Brak wyników – zmień filtry.
-          </div>
-        )}
+            const loc = r.inventory_location_label || "—";
+            const who = r.person || "—";
+            const when = fmtDate(r.date);
+            const supplier = r.supplier || "—";
+            const place = r.place_label || "—";
 
-        {rows.length > 0 && (
-          <div className="rounded-2xl border border-border bg-card p-4">
-            <div className="space-y-3">
-              {rows.map((r) => {
-                const itemsCount = toInt(r.items_count ?? null) ?? 0;
+            const paidText = paymentText(r);
+            const paidTone = paymentTone(r);
+            const approvedText = approveText(r);
 
-                const materialsCost = toNum(r.materials_cost ?? 0);
-                const deliveryCost = toNum(r.delivery_cost ?? 0);
-                const total = materialsCost + deliveryCost;
+            const href = `/reports/deliveries/${r.id}`;
 
-                const placeLabel = r.place_label || "—";
-                const personLabel = r.person || "—";
-                const supplierLabel = r.supplier || "—";
-
-                const pay = paymentLabel(r);
-
-                const due = r.payment_due_date ? fmtDate(r.payment_due_date) : "—";
-                const days = toInt(r.days_to_due ?? null);
-
-                const statusTone = r.approved ? "ok" : "warn";
-                const statusText = r.approved ? "zatwierdzona" : "oczekująca";
-
-                const href = `/reports/deliveries/${r.id}`;
-
-                return (
-                  <Link
-                    key={r.id}
-                    href={href}
-                    className={[
-                      "block rounded-2xl border border-border bg-background/20 p-4",
-                      "hover:bg-background/35 hover:border-border/90 transition",
-                      "focus:outline-none focus:ring-2 focus:ring-foreground/40",
-                    ].join(" ")}
-                  >
-                    <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                      {/* LEWA */}
-                      <div className="min-w-0 space-y-2">
-                        {/* ID + statusy */}
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <MiniKV label="ID" value={`#${r.id.slice(0, 8)}`} />
-                          <span className="inline-flex items-center gap-2">
-                            <Tag>STATUS</Tag>
-                            <Tag tone={statusTone}>{statusText}</Tag>
-                          </span>
-                          <span className="inline-flex items-center gap-2">
-                            <Tag>PŁATNOŚĆ</Tag>
-                            <Tag tone={pay.tone}>{pay.text}</Tag>
-                          </span>
-                          <MiniKV label="POZYCJI" value={itemsCount} />
+            return (
+              <Link
+                key={r.id}
+                href={href}
+                className={cls(
+                  "block rounded-2xl border border-border bg-background/10 p-4",
+                  "hover:bg-background/18 hover:border-border/90 transition",
+                  "focus:outline-none focus:ring-2 focus:ring-foreground/30"
+                )}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className="min-w-0">
+                        <div className="text-[11px] uppercase tracking-wide opacity-60">
+                          Lokalizacja magazynowa
                         </div>
-
-                        {/* KTO / KIEDY / MIEJSCE / DOSTAWCA */}
-                        <div className="grid gap-2">
-                          <KV label="MIEJSCE" value={placeLabel} strong />
-                          <div className="flex flex-col gap-2 md:flex-row md:items-center md:gap-6">
-                            <KV label="KTO" value={personLabel} />
-                            <KV label="KIEDY" value={fmtDate(r.date)} />
-                            <KV label="DOSTAWCA" value={supplierLabel} />
-                          </div>
-                        </div>
-
-                        {/* KOSZTY */}
-                        <div className="pt-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <Tag>KOSZTY</Tag>
-                            <span className="text-[11px] opacity-80">
-                              Materiały:{" "}
-                              <span className="font-semibold">
-                                {fmtCurrency.format(materialsCost)}
-                              </span>
-                            </span>
-                            <span className="text-[11px] opacity-80">
-                              Dostawa:{" "}
-                              <span className="font-semibold">
-                                {fmtCurrency.format(deliveryCost)}
-                              </span>
-                            </span>
-                            <span className="text-[11px] opacity-80">
-                              Razem:{" "}
-                              <span className="font-semibold">
-                                {fmtCurrency.format(total)}
-                              </span>
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* TERMIN */}
-                        {!r.is_paid && (
-                          <div className="pt-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <Tag>TERMIN</Tag>
-                              {r.payment_due_date ? (
-                                <span className="text-[11px] opacity-80">
-                                  Płatność do:{" "}
-                                  <span className="font-semibold">{due}</span>
-                                  {typeof days === "number" && (
-                                    <span className="ml-1 opacity-70">
-                                      {days < 0
-                                        ? `(po terminie o ${Math.abs(days)} dni)`
-                                        : days === 0
-                                        ? "(termin dzisiaj)"
-                                        : `(za ${days} dni)`}
-                                    </span>
-                                  )}
-                                </span>
-                              ) : (
-                                <span className="text-[11px] opacity-70">
-                                  Brak ustawionego terminu płatności.
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        )}
+                        <div className="text-sm font-semibold truncate">{loc}</div>
                       </div>
 
-                      {/* PRAWA: akcje */}
-                      <div className="flex items-center gap-2 text-sm flex-wrap justify-end">
-                        {!r.is_paid && (
-                          <form
-                            action={markDeliveryPaid}
-                            onClick={(e) => e.stopPropagation()}
-                            onSubmit={(e) => e.stopPropagation()}
-                          >
-                            <input type="hidden" name="delivery_id" value={r.id} />
-                            <button
-                              type="submit"
-                              className="px-3 py-2 rounded border border-emerald-500/60 bg-emerald-600/20 text-emerald-100 hover:bg-emerald-600/30 text-sm transition"
-                            >
-                              Oznacz jako opłaconą
-                            </button>
-                          </form>
-                        )}
-
-                        {!r.approved && (
-                          <form
-                            action={approveDelivery}
-                            onClick={(e) => e.stopPropagation()}
-                            onSubmit={(e) => e.stopPropagation()}
-                          >
-                            <input type="hidden" name="delivery_id" value={r.id} />
-                            <ApproveButton>Akceptuj (magazyn)</ApproveButton>
-                          </form>
-                        )}
-
-                        <span className="px-3 py-2 rounded border border-border bg-card hover:bg-card/80 text-sm transition">
-                          Szczegóły →
-                        </span>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Pill tone={r.approved ? "ok" : "warn"}>{approvedText}</Pill>
+                        <Pill tone={paidTone}>{paidText}</Pill>
                       </div>
                     </div>
-                  </Link>
-                );
-              })}
+
+                    <div className="mt-2 grid gap-1 text-xs opacity-80">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="opacity-60">Kto:</span>
+                        <span className="font-medium">{who}</span>
+                        <span className="opacity-50">•</span>
+                        <span className="opacity-60">Kiedy:</span>
+                        <span className="font-medium">{when}</span>
+                      </div>
+
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="opacity-60">Plac:</span>
+                        <span className="font-medium">{place}</span>
+                        <span className="opacity-50">•</span>
+                        <span className="opacity-60">Dostawca:</span>
+                        <span className="font-medium">{supplier}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col items-end gap-2 shrink-0">
+                    <div className="text-right">
+                      <div className="text-[11px] opacity-60">Razem</div>
+                      <div className="text-sm font-semibold">{fmtCurrency.format(total)}</div>
+                      <div className="hidden md:block text-[11px] opacity-70 mt-1">
+                        Mat.: {fmtCurrency.format(materialsCost)} • Dost.:{" "}
+                        {fmtCurrency.format(deliveryCost)}
+                      </div>
+                    </div>
+
+                    <div className="hidden md:flex items-center gap-2 flex-wrap justify-end">
+                      <span
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                        }}
+                        onMouseDown={(e) => {
+                          e.stopPropagation();
+                          e.preventDefault();
+                        }}
+                      >
+                        <DeliveryInvoicesOverlay
+                          deliveryId={r.id}
+                          triggerLabel="Dokumenty"
+                          triggerClassName={btnDocs}
+                        />
+                      </span>
+
+                      {!r.is_paid && (
+                        <form
+                          action={markDeliveryPaid}
+                          onClick={(e) => e.stopPropagation()}
+                          onSubmit={(e) => e.stopPropagation()}
+                        >
+                          <input type="hidden" name="delivery_id" value={r.id} />
+                          <button type="submit" className={btnWarn}>
+                            Oznacz opłaconą
+                          </button>
+                        </form>
+                      )}
+
+                      {!r.approved && (
+                        <form
+                          action={approveDelivery}
+                          onClick={(e) => e.stopPropagation()}
+                          onSubmit={(e) => e.stopPropagation()}
+                        >
+                          <input type="hidden" name="delivery_id" value={r.id} />
+                          <ApproveButton className={btnPrimary as any}>Akceptuj</ApproveButton>
+                        </form>
+                      )}
+
+                      <span className={cls(btnDetails, "px-3")}>Szczegóły →</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 md:hidden flex items-center gap-2 flex-wrap justify-end">
+                  <span
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                    }}
+                    onMouseDown={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                    }}
+                  >
+                    <DeliveryInvoicesOverlay
+                      deliveryId={r.id}
+                      triggerLabel="Dokumenty"
+                      triggerClassName={btnDocs}
+                    />
+                  </span>
+
+                  {!r.is_paid && (
+                    <form
+                      action={markDeliveryPaid}
+                      onClick={(e) => e.stopPropagation()}
+                      onSubmit={(e) => e.stopPropagation()}
+                    >
+                      <input type="hidden" name="delivery_id" value={r.id} />
+                      <button type="submit" className={btnWarn}>
+                        Oznacz opłaconą
+                      </button>
+                    </form>
+                  )}
+
+                  {!r.approved && (
+                    <form
+                      action={approveDelivery}
+                      onClick={(e) => e.stopPropagation()}
+                      onSubmit={(e) => e.stopPropagation()}
+                    >
+                      <input type="hidden" name="delivery_id" value={r.id} />
+                      <ApproveButton className={btnPrimary as any}>Akceptuj</ApproveButton>
+                    </form>
+                  )}
+
+                  <span className={cls(btnDetails, "px-3")}>Szczegóły →</span>
+                </div>
+              </Link>
+            );
+          })}
+        </div>
+      </section>
+
+      {filtersOpen && (
+        <div className="fixed inset-0 z-[60]">
+          <div className="absolute inset-0 bg-black/60" onClick={() => setFiltersOpen(false)} />
+
+          <div
+            className={cls(
+              "absolute top-0 right-0 h-full w-[min(420px,100%)]",
+              "bg-card border-l border-border shadow-2xl",
+              "overflow-y-auto",
+              "translate-x-0 animate-[deliveriesFilterSlideIn_.18s_ease-out]"
+            )}
+          >
+            <div className="flex items-center justify-between p-4 border-b border-border bg-background/10">
+              <div className="text-base font-semibold">Filtry</div>
+              <button
+                type="button"
+                className={cls(btnGhost, "h-9 w-9 px-0")}
+                onClick={() => setFiltersOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="p-4 space-y-4">
+              <div className="grid gap-3">
+                <label className="grid gap-1">
+                  <span className="text-xs opacity-70">Szukaj</span>
+                  <input
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="osoba / lokalizacja / plac / dostawca / ID…"
+                    className="h-11 w-full rounded-lg border border-border bg-background px-3 text-sm"
+                    autoFocus
+                  />
+                </label>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="grid gap-1">
+                    <span className="text-xs opacity-70">Od</span>
+                    <input
+                      value={from}
+                      onChange={(e) => setFrom(e.target.value)}
+                      type="date"
+                      className="h-11 w-full rounded-lg border border-border bg-background px-3 text-sm"
+                    />
+                  </label>
+
+                  <label className="grid gap-1">
+                    <span className="text-xs opacity-70">Do</span>
+                    <input
+                      value={to}
+                      onChange={(e) => setTo(e.target.value)}
+                      type="date"
+                      className="h-11 w-full rounded-lg border border-border bg-background px-3 text-sm"
+                    />
+                  </label>
+                </div>
+
+                <label className="grid gap-1">
+                  <span className="text-xs opacity-70">Osoba</span>
+                  <input
+                    value={person}
+                    onChange={(e) => setPerson(e.target.value)}
+                    placeholder="np. Kowalski"
+                    className="h-11 w-full rounded-lg border border-border bg-background px-3 text-sm"
+                  />
+                </label>
+
+                <label className="grid gap-1">
+                  <span className="text-xs opacity-70">Lokalizacja</span>
+                  <input
+                    value={inventoryLocation}
+                    onChange={(e) => setInventoryLocation(e.target.value)}
+                    placeholder="np. Magazyn A"
+                    className="h-11 w-full rounded-lg border border-border bg-background px-3 text-sm"
+                  />
+                </label>
+
+                <label className="grid gap-1">
+                  <span className="text-xs opacity-70">Status</span>
+                  <select
+                    value={status}
+                    onChange={(e) => setStatus(e.target.value as StatusFilter)}
+                    className="h-11 w-full rounded-lg border border-border bg-background px-3 text-sm"
+                  >
+                    <option value="all">Wszystkie</option>
+                    <option value="pending">Oczekujące</option>
+                    <option value="approved">Zatwierdzone</option>
+                  </select>
+                </label>
+
+                <div className="text-xs opacity-60">
+                  Filtry działają na żywo. „Zastosuj” tylko zamyka panel.
+                </div>
+              </div>
+            </div>
+
+            <div className="p-4 border-t border-border bg-background/10 flex items-center justify-between gap-2">
+              <button type="button" className={btnGhost} onClick={clearAll}>
+                Wyczyść
+              </button>
+
+              <button type="button" className={btnPrimary} onClick={() => setFiltersOpen(false)}>
+                Zastosuj
+              </button>
             </div>
           </div>
-        )}
-      </section>
+
+          <style jsx>{`
+            @keyframes deliveriesFilterSlideIn_ {
+              from {
+                transform: translateX(28px);
+                opacity: 0;
+              }
+              to {
+                transform: translateX(0);
+                opacity: 1;
+              }
+            }
+          `}</style>
+        </div>
+      )}
     </main>
   );
 }

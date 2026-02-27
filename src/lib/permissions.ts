@@ -74,7 +74,7 @@ export const PERM = {
   TASKS_UPLOAD_PHOTOS: "tasks.upload_photos",
 
   /* ------------------------------------------------------------------ */
-  /* Metrics / Reports                                                   */
+  /* Metrics / Reports / Summary                                         */
   /* ------------------------------------------------------------------ */
   METRICS_READ: "metrics.read",
   METRICS_MANAGE: "metrics.manage",
@@ -84,6 +84,12 @@ export const PERM = {
   REPORTS_STAGES_READ: "reports.stages.read",
   REPORTS_ITEMS_READ: "reports.items.read",
   REPORTS_INVENTORY_READ: "reports.inventory.read",
+
+  // ✅ NOWE: Transfery
+  REPORTS_TRANSFERS_READ: "reports.transfers.read",
+
+  // ✅ Summary / PVR dashboard (blokujemy worker/storeman/foreman)
+  SUMMARY_READ: "summary.read",
 
   /* ------------------------------------------------------------------ */
   /* Team / Crews                                                        */
@@ -197,12 +203,11 @@ export function can(snapshot: PermissionSnapshot | null | undefined, key: Permis
   // direct
   if (perms.includes(normalizedKey)) return true;
 
-  // tasks: ALL implikuje OWN (to naprawia "Moje zadania" gdy masz tylko tasks.read.all)
+  // tasks: ALL implikuje OWN
   if (normalizedKey === PERM.TASKS_READ_OWN && perms.includes(PERM.TASKS_READ_ALL)) return true;
   if (normalizedKey === PERM.TASKS_UPDATE_OWN && perms.includes(PERM.TASKS_UPDATE_ALL)) return true;
 
-  // crews umbrella:
-  // jeśli ktoś ma crews.manage lub team.manage_crews, uznajemy że ma crews.* (create/update/delete/assign/...)
+  // crews umbrella
   if (
     normalizedKey.startsWith("crews.") &&
     (perms.includes(PERM.CREWS_MANAGE) || perms.includes(PERM.TEAM_MANAGE_CREWS))
@@ -246,11 +251,9 @@ export const PERM_GROUPS = {
     PERM.DAILY_REPORTS_UPDATE_UNAPPROVED,
     PERM.DAILY_REPORTS_APPROVE,
 
-    // zdjęcia raportów dziennych
     PERM.DAILY_REPORTS_PHOTOS_UPLOAD,
     PERM.DAILY_REPORTS_PHOTOS_DELETE,
 
-    // aliasy UI (mapowane na approve)
     PERM.DAILY_REPORTS_QUEUE,
     PERM.DAILY_REPORTS_DELETE_UNAPPROVED,
 
@@ -277,6 +280,10 @@ export const PERM_GROUPS = {
     PERM.REPORTS_ITEMS_READ,
     PERM.REPORTS_INVENTORY_READ,
 
+    // ✅ NOWE
+    PERM.REPORTS_TRANSFERS_READ,
+
+    PERM.SUMMARY_READ,
     PERM.MATERIALS_AUDIT_READ,
   ],
 
@@ -292,7 +299,6 @@ export const PERM_GROUPS = {
     PERM.CREWS_READ,
     PERM.CREWS_MANAGE,
 
-    // granularne (na przyszłość + pod route'y)
     PERM.CREWS_CREATE,
     PERM.CREWS_UPDATE,
     PERM.CREWS_DELETE,

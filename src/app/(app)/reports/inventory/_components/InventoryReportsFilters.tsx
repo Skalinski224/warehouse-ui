@@ -1,107 +1,69 @@
 // src/app/(app)/reports/inventory/_components/InventoryReportsFilters.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
-
 type Props = {
-  initialFrom: string;
-  initialTo: string;
-  initialQ: string;
+  from: string;
+  to: string;
+  q: string;
+
+  onChangeFrom: (v: string) => void;
+  onChangeTo: (v: string) => void;
+  onChangeQ: (v: string) => void;
+
+  onClear: () => void;
+
+  // styl przycisku (kanon z deliveries)
+  btnGhostClass: string;
 };
 
+function cls(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
+
 export default function InventoryReportsFilters({
-  initialFrom,
-  initialTo,
-  initialQ,
+  from,
+  to,
+  q,
+  onChangeFrom,
+  onChangeTo,
+  onChangeQ,
+  onClear,
+  btnGhostClass,
 }: Props) {
-  const router = useRouter();
-  const pathname = usePathname();
-  const sp = useSearchParams();
-
-  const [from, setFrom] = useState(initialFrom);
-  const [to, setTo] = useState(initialTo);
-  const [q, setQ] = useState(initialQ);
-
-  // jeśli user wejdzie w URL z parametrami / wstecz-przód, zsynchronizuj stan
-  useEffect(() => setFrom(initialFrom), [initialFrom]);
-  useEffect(() => setTo(initialTo), [initialTo]);
-  useEffect(() => setQ(initialQ), [initialQ]);
-
-  const baseParams = useMemo(() => {
-    const p = new URLSearchParams(sp.toString());
-    // zostawiamy ewentualne inne parametry, ale nadpisujemy te 3
-    p.delete("from");
-    p.delete("to");
-    p.delete("q");
-    return p;
-  }, [sp]);
-
-  useEffect(() => {
-    const t = setTimeout(() => {
-      const params = new URLSearchParams(baseParams.toString());
-
-      const f = from.trim();
-      const tt = to.trim();
-      const qq = q.trim();
-
-      if (f) params.set("from", f);
-      if (tt) params.set("to", tt);
-      if (qq) params.set("q", qq);
-
-      const qs = params.toString();
-      router.replace(qs ? `${pathname}?${qs}` : pathname);
-    }, 250); // "na każdą literę" ale bez DDOS — lekki debounce
-
-    return () => clearTimeout(t);
-  }, [from, to, q, router, pathname, baseParams]);
-
-  function clearAll() {
-    setFrom("");
-    setTo("");
-    setQ("");
-  }
-
   return (
-    <div className="card p-3">
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
-        <label className="space-y-1 block">
-          <div className="text-[11px] text-muted-foreground">Od</div>
-          <input
-            type="date"
-            value={from}
-            onChange={(e) => setFrom(e.target.value)}
-            className="w-full rounded-md border border-border bg-background px-3 py-2 text-xs"
-          />
-        </label>
+    <div className="grid gap-3 md:grid-cols-12">
+      <label className="grid gap-1 md:col-span-3">
+        <span className="text-xs opacity-70">Od</span>
+        <input
+          type="date"
+          value={from}
+          onChange={(e) => onChangeFrom(e.target.value)}
+          className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm"
+        />
+      </label>
 
-        <label className="space-y-1 block">
-          <div className="text-[11px] text-muted-foreground">Do</div>
-          <input
-            type="date"
-            value={to}
-            onChange={(e) => setTo(e.target.value)}
-            className="w-full rounded-md border border-border bg-background px-3 py-2 text-xs"
-          />
-        </label>
+      <label className="grid gap-1 md:col-span-3">
+        <span className="text-xs opacity-70">Do</span>
+        <input
+          type="date"
+          value={to}
+          onChange={(e) => onChangeTo(e.target.value)}
+          className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm"
+        />
+      </label>
 
-        <label className="space-y-1 block md:col-span-2">
-          <div className="text-[11px] text-muted-foreground">Szukaj (kto / opis)</div>
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="np. Przemysław, dostawa, piwnica..."
-            className="w-full rounded-md border border-border bg-background px-3 py-2 text-xs"
-          />
-        </label>
-      </div>
+      <label className="grid gap-1 md:col-span-6">
+        <span className="text-xs opacity-70">Szukaj</span>
+        <input
+          value={q}
+          onChange={(e) => onChangeQ(e.target.value)}
+          placeholder="kto / opis / lokalizacja…"
+          className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm"
+        />
+      </label>
 
-      <div className="mt-3 flex items-center justify-end gap-2">
-        <button
-          type="button"
-          onClick={clearAll}
-          className="rounded-md border border-border px-3 py-2 text-xs text-muted-foreground hover:text-foreground"
-        >
+      <div className="md:col-span-12 flex items-center justify-end gap-2 pt-1 pr-1">
+        <button type="button" onClick={onClear} className={cls(btnGhostClass, "mr-1")}>
           Wyczyść
         </button>
       </div>

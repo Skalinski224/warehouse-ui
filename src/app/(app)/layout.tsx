@@ -1,3 +1,4 @@
+// src/app/(app)/layout.tsx
 import type { ReactNode } from "react";
 
 import Sidebar from "@/components/Sidebar";
@@ -8,6 +9,9 @@ import { supabaseServer } from "@/lib/supabaseServer";
 import { getPermissionSnapshot } from "@/lib/currentUser";
 import { RoleProvider } from "@/lib/RoleContext";
 import type { PermissionSnapshot } from "@/lib/permissions";
+
+// ✅ FIX: wyłącz prerender dla całej appki (CSR-bailout z useSearchParams w childach)
+export const dynamic = "force-dynamic";
 
 function roleLabelFromSnapshot(snap: PermissionSnapshot | null): string {
   if (!snap) return "—";
@@ -24,9 +28,6 @@ function roleLabelFromSnapshot(snap: PermissionSnapshot | null): string {
 }
 
 async function getTeamProfile(sb: any, userId: string) {
-  // Minimalny, bezpieczny fetch:
-  // 1) team_members po user_id
-  // 2) (opcjonalnie) crews po crew_id
   try {
     const { data: tm, error: tmErr } = await sb
       .from("team_members")
@@ -34,7 +35,12 @@ async function getTeamProfile(sb: any, userId: string) {
       .eq("user_id", userId)
       .maybeSingle();
 
-    if (tmErr) return { fullName: null as string | null, crewName: null as string | null };
+    if (tmErr) {
+      return {
+        fullName: null as string | null,
+        crewName: null as string | null,
+      };
+    }
 
     const first = String(tm?.first_name ?? "").trim();
     const last = String(tm?.last_name ?? "").trim();
@@ -67,11 +73,11 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
 
   const displayRole = roleLabelFromSnapshot(permissions);
 
-  // fullName + crew z team_members/crews (fallback na user metadata/email)
   let fullName =
     (user?.user_metadata?.full_name as string | undefined) ??
     (user?.user_metadata?.name as string | undefined) ??
     "";
+
   let crewName: string | null = null;
 
   if (user?.id) {
@@ -94,19 +100,33 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
 
         {/* Right column */}
         <div className="lg:pl-64">
-          <div className="sticky top-0 z-30 flex items-center justify-between gap-3 px-4 md:px-6 py-3 border-b border-border bg-background/80 backdrop-blur">
-            {/* Left: hamburger (tablet/phone) */}
-            <div className="flex items-center gap-2">
-              <MobileNavDrawer fullName={fullName} roleLabel={displayRole} crewName={crewName} />
-            </div>
+          <div className="sticky top-0 z-30 border-b border-border bg-background/80 backdrop-blur">
+            <div className="flex items-center justify-between gap-3 px-4 sm:px-8 md:px-16 lg:px-20 py-3">
+              {/* Left: hamburger (tablet/phone) */}
+              <div className="flex items-center gap-2">
+                <MobileNavDrawer
+                  fullName={fullName}
+                  roleLabel={displayRole}
+                  crewName={crewName}
+                />
+              </div>
 
-            {/* Right: UserMenu widoczny na tablet+ (md+) i desktop */}
-            <div className="hidden md:flex items-center gap-3">
-              {user ? <UserMenu fullName={fullName} roleLabel={displayRole} crewName={crewName} /> : null}
+              {/* Right: UserMenu — ✅ widoczne też na telefonie */}
+              <div className="flex items-center gap-3">
+                {user ? (
+                  <UserMenu
+                    fullName={fullName}
+                    roleLabel={displayRole}
+                    crewName={crewName}
+                  />
+                ) : null}
+              </div>
             </div>
           </div>
 
-          <main className="px-4 md:px-6 pb-14 md:pb-10 pt-6">{children}</main>
+          <main className="px-4 sm:px-8 md:px-16 lg:px-20 pb-14 md:pb-10 pt-6">
+            {children}
+          </main>
         </div>
       </div>
     </RoleProvider>

@@ -1,7 +1,6 @@
 // src/app/(app)/team/actions.ts
 "use server";
 
-import { notFound } from "next/navigation";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { PERM, can, type PermissionSnapshot } from "@/lib/permissions";
 
@@ -22,8 +21,21 @@ async function fetchMyPermissionsSnapshot(): Promise<PermissionSnapshot | null> 
   return unwrapSnapshot(data);
 }
 
-function requirePerm(snapshot: PermissionSnapshot | null, key: any) {
-  if (!can(snapshot, key)) notFound();
+function requirePerm(snapshot: PermissionSnapshot | null, key: any, msg: string) {
+  if (!can(snapshot, key)) {
+    // ✅ ważne: NIE notFound(), bo to ucina flow i toast nie zadziała
+    throw new Error(msg);
+  }
+}
+
+function normEmail(v: unknown): string | null {
+  const s = String(v ?? "").trim().toLowerCase();
+  return s ? s : null;
+}
+
+function normText(v: unknown): string | null {
+  const s = String(v ?? "").trim();
+  return s ? s : null;
 }
 
 /* ------------------------------ ACTIONS ------------------------------ */
@@ -40,11 +52,11 @@ export async function updateTeamMemberAction(form: {
   const snapshot = await fetchMyPermissionsSnapshot();
 
   const update: Record<string, any> = {};
-  if ("first_name" in form) update.first_name = form.first_name;
-  if ("last_name" in form) update.last_name = form.last_name;
-  if ("email" in form) update.email = form.email;
-  if ("phone" in form) update.phone = form.phone;
-  if ("crew_id" in form) update.crew_id = form.crew_id;
+  if ("first_name" in form) update.first_name = normText(form.first_name);
+  if ("last_name" in form) update.last_name = normText(form.last_name);
+  if ("email" in form) update.email = normEmail(form.email);
+  if ("phone" in form) update.phone = normText(form.phone);
+  if ("crew_id" in form) update.crew_id = form.crew_id ?? null;
 
   if (Object.keys(update).length === 0) return;
 
@@ -52,9 +64,10 @@ export async function updateTeamMemberAction(form: {
   const onlyCrewChange = touchedKeys.every((k) => k === "crew_id");
 
   if (onlyCrewChange) {
-    requirePerm(snapshot, PERM.TEAM_MANAGE_CREWS);
+    requirePerm(snapshot, PERM.TEAM_MANAGE_CREWS, "Brak uprawnień do zmiany brygady.");
   } else {
-    requirePerm(snapshot, PERM.TEAM_MANAGE_ROLES);
+    // u Ciebie dane kontaktowe są pod TEAM_MANAGE_ROLES
+    requirePerm(snapshot, PERM.TEAM_MANAGE_ROLES, "Brak uprawnień do edycji danych członka zespołu.");
   }
 
   const { error } = await supabase.from("team_members").update(update).eq("id", form.id);
@@ -69,7 +82,7 @@ export async function deleteTeamMemberAction(id: string) {
   const supabase = await supabaseServer();
   const snapshot = await fetchMyPermissionsSnapshot();
 
-  requirePerm(snapshot, PERM.TEAM_REMOVE);
+  requirePerm(snapshot, PERM.TEAM_REMOVE, "Brak uprawnień do usuwania członków zespołu.");
 
   const { error } = await supabase.rpc("delete_team_member", { p_member_id: id });
 
@@ -83,7 +96,7 @@ export async function resendInviteAction(id: string) {
   const supabase = await supabaseServer();
   const snapshot = await fetchMyPermissionsSnapshot();
 
-  requirePerm(snapshot, PERM.TEAM_INVITE);
+  requirePerm(snapshot, PERM.TEAM_INVITE, "Brak uprawnień do ponawiania zaproszeń.");
 
   const { data, error } = await supabase.rpc("rotate_invite_token", { p_member_id: id });
 

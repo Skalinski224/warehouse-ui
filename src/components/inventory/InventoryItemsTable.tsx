@@ -20,15 +20,21 @@ export default function InventoryItemsTable(props: {
   items: Item[];
   visible: number;
   approved: boolean;
-
   onQtyBlur?: (materialId: string, value: string) => void;
   onRemove?: (materialId: string) => void;
 }) {
   const rows = props.items.slice(0, props.visible);
 
+  const inputBase = "h-10 border border-border bg-background rounded px-3 text-sm w-full";
+  const inputReadOnly =
+    "h-10 border border-border bg-background rounded px-3 text-sm w-full flex items-center text-muted-foreground";
+  const labelBase = "text-sm";
+  const dangerBtn =
+    "rounded-md border border-red-500/60 bg-red-500/10 px-3 py-1.5 text-[11px] text-red-200 hover:bg-red-500/20 active:bg-red-500/25 transition";
+
   if (!props.items.length) {
     return (
-      <div className="rounded-xl border border-border p-3 text-xs text-muted-foreground bg-background/10">
+      <div className="rounded-md border border-border p-3 text-xs text-muted-foreground bg-background/10">
         Brak pozycji w tej inwentaryzacji. Dodaj wszystkie albo wyszukaj materiał.
       </div>
     );
@@ -40,75 +46,67 @@ export default function InventoryItemsTable(props: {
       <div className="grid gap-2 sm:hidden">
         {rows.map((i) => {
           const unit = i.material_unit ?? "";
-          const diff =
-            i.counted_qty !== null ? i.counted_qty - i.system_qty : null;
+          const diff = i.counted_qty !== null ? i.counted_qty - i.system_qty : null;
+          const diffText = diff === null ? "—" : fmtDiff(diff);
 
           return (
-            <div
-              key={i.item_id}
-              className="rounded-2xl border border-border bg-background/10 p-3 space-y-2"
-            >
+            <div key={i.item_id} className="rounded-md border border-border bg-background/10 p-3 space-y-3">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="text-sm font-medium truncate">
-                    {i.material_title}
-                  </div>
-                  <div className="mt-1 text-[11px] text-muted-foreground">
-                    Stan w systemie:{" "}
-                    <span className="text-foreground">
-                      {i.system_qty}
-                      {unit ? ` ${unit}` : ""}
-                    </span>
-                  </div>
+                  <div className="text-sm font-medium truncate">{i.material_title}</div>
                 </div>
 
                 {!props.approved ? (
                   <button
                     type="button"
                     onClick={() => props.onRemove?.(i.material_id)}
-                    className="shrink-0 rounded-lg border border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-300 hover:bg-red-500/15 active:bg-red-500/20 transition"
+                    className={dangerBtn}
                   >
                     Usuń
                   </button>
                 ) : null}
               </div>
 
-              <div className="grid gap-2">
-                <div className="text-[11px] text-muted-foreground">
-                  Stan po przeliczeniu
-                </div>
-
-                {props.approved ? (
-                  <div className="rounded-xl border border-border bg-background/20 px-3 py-2 text-sm">
-                    <span className="text-muted-foreground">
-                      {i.counted_qty ?? "—"}
-                      {unit ? ` ${unit}` : ""}
+              <div className="grid gap-3">
+                {/* Stan w systemie */}
+                <div className="grid gap-2">
+                  <label className={labelBase}>Stan w systemie</label>
+                  <div className={inputReadOnly}>
+                    <span className="text-foreground">
+                      {i.system_qty} {unit ? `${unit}` : ""}
                     </span>
                   </div>
-                ) : (
-                  <div className="flex items-center gap-2">
+                </div>
+
+                {/* Stan faktyczny */}
+                <div className="grid gap-2">
+                  <label className={labelBase}>Stan faktyczny</label>
+
+                  {props.approved ? (
+                    <div className={inputReadOnly}>
+                      <span className="text-foreground">
+                        {i.counted_qty ?? "—"} {unit ? `${unit}` : ""}
+                      </span>
+                    </div>
+                  ) : (
                     <input
                       type="number"
                       inputMode="decimal"
                       defaultValue={i.counted_qty ?? ""}
-                      onBlur={(e) =>
-                        props.onQtyBlur?.(i.material_id, e.currentTarget.value)
-                      }
-                      className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm"
+                      onBlur={(e) => props.onQtyBlur?.(i.material_id, e.currentTarget.value)}
+                      className={inputBase}
                     />
-                    {unit ? (
-                      <span className="text-[11px] text-muted-foreground whitespace-nowrap">
-                        {unit}
-                      </span>
-                    ) : null}
-                  </div>
-                )}
+                  )}
+                </div>
 
-                <div className="flex items-center justify-between pt-1 text-[11px] text-muted-foreground">
-                  <span>Różnica</span>
-                  <span className="text-foreground">
-                    {diff === null ? "—" : fmtDiff(diff)}
-                  </span>
+                {/* Różnica */}
+                <div className="grid gap-2">
+                  <label className={labelBase}>Różnica</label>
+                  <div className={inputReadOnly}>
+                    <span className="text-foreground">
+                      {diffText} {diff !== null && unit ? `${unit}` : ""}
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -121,13 +119,9 @@ export default function InventoryItemsTable(props: {
         <table className="w-full text-xs">
           <thead className="border-b border-border text-muted-foreground">
             <tr>
-              <th className="px-2 py-2 text-left">Materiał</th>
-              <th className="px-2 py-2 text-left whitespace-nowrap">
-                Stan w systemie
-              </th>
-              <th className="px-2 py-2 text-left whitespace-nowrap">
-                Stan po przeliczeniu
-              </th>
+              <th className="px-2 py-2 text-left">Pozycja</th>
+              <th className="px-2 py-2 text-left whitespace-nowrap">Stan w systemie</th>
+              <th className="px-2 py-2 text-left whitespace-nowrap">Stan faktyczny</th>
               <th className="px-2 py-2 text-left whitespace-nowrap">Różnica</th>
               {!props.approved && <th className="px-2 py-2 text-left" />}
             </tr>
@@ -135,29 +129,24 @@ export default function InventoryItemsTable(props: {
 
           <tbody>
             {rows.map((i) => {
-              const diff =
-                i.counted_qty !== null ? i.counted_qty - i.system_qty : null;
+              const diff = i.counted_qty !== null ? i.counted_qty - i.system_qty : null;
               const unit = i.material_unit ?? "";
+              const diffText = diff === null ? "—" : fmtDiff(diff);
 
               return (
-                <tr
-                  key={i.item_id}
-                  className="border-b border-border hover:bg-background/20 transition"
-                >
-                  <td className="px-2 py-2 max-w-[520px] truncate">
-                    {i.material_title}
-                  </td>
+                <tr key={i.item_id} className="border-b border-border hover:bg-background/20 transition">
+                  <td className="px-2 py-2 max-w-[520px] truncate">{i.material_title}</td>
 
                   <td className="px-2 py-2 whitespace-nowrap">
-                    {i.system_qty}
-                    {unit ? ` ${unit}` : ""}
+                    <span className="text-muted-foreground">
+                      {i.system_qty} {unit ? `${unit}` : ""}
+                    </span>
                   </td>
 
                   <td className="px-2 py-2 whitespace-nowrap">
                     {props.approved ? (
                       <span className="text-muted-foreground">
-                        {i.counted_qty ?? "—"}
-                        {unit ? ` ${unit}` : ""}
+                        {i.counted_qty ?? "—"} {unit ? `${unit}` : ""}
                       </span>
                     ) : (
                       <div className="inline-flex items-center gap-2">
@@ -165,25 +154,16 @@ export default function InventoryItemsTable(props: {
                           type="number"
                           inputMode="decimal"
                           defaultValue={i.counted_qty ?? ""}
-                          onBlur={(e) =>
-                            props.onQtyBlur?.(
-                              i.material_id,
-                              e.currentTarget.value
-                            )
-                          }
+                          onBlur={(e) => props.onQtyBlur?.(i.material_id, e.currentTarget.value)}
                           className="w-28 rounded-md border border-border bg-background px-2 py-1"
                         />
-                        {unit ? (
-                          <span className="text-[11px] text-muted-foreground">
-                            {unit}
-                          </span>
-                        ) : null}
+                        {unit ? <span className="text-[11px] text-muted-foreground">{unit}</span> : null}
                       </div>
                     )}
                   </td>
 
                   <td className="px-2 py-2 whitespace-nowrap">
-                    {diff === null ? "—" : fmtDiff(diff)}
+                    <span className="text-muted-foreground">{diffText}</span>
                   </td>
 
                   {!props.approved && (
@@ -191,7 +171,7 @@ export default function InventoryItemsTable(props: {
                       <button
                         type="button"
                         onClick={() => props.onRemove?.(i.material_id)}
-                        className="rounded-md border border-red-500/40 bg-red-500/10 px-2 py-1 text-[11px] text-red-300 hover:bg-red-500/15 active:bg-red-500/20 transition"
+                        className={dangerBtn}
                       >
                         Usuń
                       </button>

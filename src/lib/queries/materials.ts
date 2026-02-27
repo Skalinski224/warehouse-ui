@@ -1,11 +1,11 @@
 // src/lib/queries/materials.ts
-
 import { supabaseServer } from "@/lib/supabaseServer";
 import type { MaterialOverview, MaterialOption } from "@/lib/dto";
 import { PERM, can } from "@/lib/permissions";
 
 type SortKey = "title" | "current_quantity" | "base_quantity" | "created_at";
 type Dir = "asc" | "desc";
+type State = "active" | "deleted";
 
 function calcStockPct(current: any, base: any): number {
   const c = Number(current ?? 0);
@@ -21,108 +21,185 @@ async function getSnapshot() {
   return Array.isArray(data) ? (data[0] ?? null) : (data ?? null);
 }
 
+function looksLikeMissingColumn(err: any): boolean {
+  const code = String(err?.code || "");
+  const msg = String(err?.message || "");
+  return (
+    code === "42703" ||
+    /column .* does not exist/i.test(msg) ||
+    /schema cache/i.test(msg) ||
+    /could not find/i.test(msg)
+  );
+}
+
 /* ----------------------------------------------------------------------------
  * 1) Lista materiałów (katalog)
- *    ŹRÓDŁO: public.materials
- *    - pełny gate permissions
- *    - wyszukiwanie
- *    - sortowanie
- *    - soft-delete
  * ----------------------------------------------------------------------------
  */
 export async function fetchMaterials(params: {
   q: string | null;
   sort: SortKey;
   dir: Dir;
-  include_deleted: boolean;
   limit: number;
   offset: number;
+
+  // ✅ filtry
+  inventory_location_id?: string | null;
+  state?: State; // active|deleted
 }): Promise<MaterialOverview[]> {
   const snapshot = await getSnapshot();
 
-  // Gate: czytanie materiałów
   if (!can(snapshot, PERM.MATERIALS_READ)) return [];
 
-  // Bez MATERIALS_SOFT_DELETE nie wolno przeglądać usuniętych,
-  // nawet jeśli ktoś spróbuje wcisnąć include_deleted=true z URL.
   const canSeeDeleted = can(snapshot, PERM.MATERIALS_SOFT_DELETE);
-  const includeDeleted = params.include_deleted && canSeeDeleted;
+  const state: State =
+    params.state === "deleted" && canSeeDeleted ? "deleted" : "active";
 
   const supabase = await supabaseServer();
-
-  let query = supabase
-    .from("materials")
-    .select(
-      `
-        id,
-        title,
-        description,
-        family_key,
-        unit,
-        base_quantity,
-        current_quantity,
-        image_url,
-        deleted_at,
-        created_at
-      `
-    );
-
-  if (params.q) {
-    query = query.ilike("title", `%${params.q}%`);
-  }
-
-  if (!includeDeleted) {
-    query = query.is("deleted_at", null);
-  }
-
   const ascending = params.dir !== "desc";
-  query = query.order(params.sort, { ascending });
 
-  query = query.range(params.offset, params.offset + params.limit - 1);
+  const selectNew = `
+    id,
+    title,
+    description,
+    unit,
+    base_quantity,
+    current_quantity,
+    image_url,
+    cta_url,
+    created_at,
+    inventory_location_id,
+    inventory_location_label,
+    family_key,
+    deleted_at
+  `;
 
-  const { data, error } = await query;
+  const selectOld = `
+    id,
+    title,
+    description,
+    family_key,
+    unit,
+    base_quantity,
+    current_quantity,
+    image_url,
+    deleted_at,
+    created_at
+  `;
 
-  if (error) {
-    console.error("fetchMaterials error:", error);
-    return [];
+  async function runSelect(selectStr: string) {
+    let query = supabase.from("materials").select(selectStr);
+
+    if (params.q) query = query.ilike("title", `%${params.q}%`);
+
+    if (params.inventory_location_id) {
+      query = query.eq("inventory_location_id", params.inventory_location_id);
+    }
+
+    // ✅ stan
+    if (state === "deleted") query = query.not("deleted_at", "is", null);
+    else query = query.is("deleted_at", null);
+
+    query = query.order(params.sort, { ascending });
+    query = query.range(params.offset, params.offset + params.limit - 1);
+
+    const { data, error } = await query;
+    if (error) throw error;
+    return data ?? [];
   }
 
-  // Składamy MaterialOverview ręcznie (jak dawniej z v_materials_overview)
+  let data: any[] = [];
+
+  try {
+    data = await runSelect(selectNew);
+  } catch (e: any) {
+    if (!looksLikeMissingColumn(e)) {
+      console.error("fetchMaterials error:", e);
+      return [];
+    }
+
+    // Jak ktoś filtruje po lokacji (kolumna może nie istnieć w starym DB),
+    // to nie udawajmy że filtr działa — zwróć pusto.
+    if (params.inventory_location_id) return [];
+
+    try {
+      data = await runSelect(selectOld);
+    } catch (e2: any) {
+      console.error("fetchMaterials fallback error:", e2);
+      return [];
+    }
+  }
+
   return (data ?? []).map((m: any) => ({
     id: m.id,
     title: m.title,
-    description: m.description ?? null, // ✅ DODANE
+    description: m.description ?? null,
     family_key: m.family_key ?? null,
-    unit: m.unit, // zakładamy NOT NULL w DB
+    unit: m.unit,
     base_quantity: m.base_quantity ?? 0,
     current_quantity: m.current_quantity ?? 0,
     stock_pct: calcStockPct(m.current_quantity, m.base_quantity),
     image_url: m.image_url ?? null,
     deleted_at: m.deleted_at ?? null,
+    inventory_location_id: m.inventory_location_id ?? null,
+    inventory_location_label: m.inventory_location_label ?? null,
+    cta_url: m.cta_url ?? null,
   })) as MaterialOverview[];
 }
 
 /* ----------------------------------------------------------------------------
- * 2) Tylko aktywne materiały — do formularzy (dzienne raporty itd.)
+ * 2) Tylko aktywne materiały — do formularzy
  * ----------------------------------------------------------------------------
  */
 export async function fetchActiveMaterials(): Promise<MaterialOption[]> {
   const snapshot = await getSnapshot();
-
-  // Gate: bez materials.read nie ma sensu pokazywać materiałów w formularzach
   if (!can(snapshot, PERM.MATERIALS_READ)) return [];
 
   const supabase = await supabaseServer();
 
-  const { data, error } = await supabase
-    .from("materials")
-    .select("id, title, unit, current_quantity, deleted_at")
-    .is("deleted_at", null)
-    .order("title");
+  const selectNew = `
+    id,
+    title,
+    unit,
+    current_quantity,
+    deleted_at,
+    inventory_location_id,
+    inventory_location_label
+  `;
 
-  if (error) {
-    console.error("[fetchActiveMaterials] error:", error);
-    return [];
+  const selectOld = `
+    id,
+    title,
+    unit,
+    current_quantity,
+    deleted_at
+  `;
+
+  async function run(selectStr: string) {
+    const { data, error } = await supabase
+      .from("materials")
+      .select(selectStr)
+      .is("deleted_at", null)
+      .order("title");
+
+    if (error) throw error;
+    return data ?? [];
+  }
+
+  let data: any[] = [];
+  try {
+    data = await run(selectNew);
+  } catch (e: any) {
+    if (!looksLikeMissingColumn(e)) {
+      console.error("[fetchActiveMaterials] error:", e);
+      return [];
+    }
+    try {
+      data = await run(selectOld);
+    } catch (e2: any) {
+      console.error("[fetchActiveMaterials] fallback error:", e2);
+      return [];
+    }
   }
 
   return (

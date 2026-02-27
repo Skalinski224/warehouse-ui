@@ -2,9 +2,18 @@
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 
+function looksLikeUuid(s: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    s
+  );
+}
+
 async function safeSelectAccountFromCookie(sb: any, cookieStore: any) {
   const accountId = cookieStore.get("wa-account-id")?.value ?? null;
   if (!accountId) return;
+
+  // ✅ nie wołamy RPC na śmieciach
+  if (!looksLikeUuid(accountId)) return;
 
   try {
     await sb.rpc("select_account", { p_account_id: accountId });
@@ -47,6 +56,5 @@ export async function supabaseServer() {
   );
 
   await safeSelectAccountFromCookie(sb, cookieStore);
-
   return sb;
 }

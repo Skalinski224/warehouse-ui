@@ -5,28 +5,33 @@ import {
   FormEvent,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type DragEvent as ReactDragEvent,
 } from "react";
 import { supabaseBrowser } from "@/lib/supabaseBrowser";
-
-// ✅
 import { uploadInvoiceFileClient } from "@/lib/uploads/invoices.client";
-
 import RoleGuard from "@/components/RoleGuard";
 import { PERM } from "@/lib/permissions";
+import { usePathname, useRouter } from "next/navigation";
+
+type LocationOption = {
+  id: string;
+  label: string;
+};
 
 type MaterialOption = {
   id: string;
   title: string;
   unit: string | null;
+  inventory_location_id: string | null;
 };
 
 type ItemDraft = {
   material_id: string;
   title: string;
-  qty: number;
-  unit_price: number;
+  qty_input: string;
+  unit_price_input: string;
 };
 
 type Step = "form" | "summary";
@@ -42,8 +47,24 @@ function todayISO(): string {
 }
 
 function toNumInput(v: string) {
-  const n = Number((v || "0").replace(",", "."));
+  const n = Number(String(v || "0").replace(",", "."));
   return Number.isFinite(n) ? n : 0;
+}
+
+function normalizeDecimalInput(raw: string) {
+  const s = String(raw ?? "");
+  const cleaned = s.replace(/[^\d.,-]/g, "");
+  const firstSep = cleaned.search(/[.,]/);
+  if (firstSep === -1) return cleaned;
+
+  const head = cleaned.slice(0, firstSep + 1);
+  const tail = cleaned
+    .slice(firstSep + 1)
+    .replace(/[.,]/g, "")
+    .replace(/-/g, "");
+  const minus = head.startsWith("-") ? "-" : "";
+  const headNoMinus = head.replace(/-/g, "");
+  return minus + headNoMinus + tail;
 }
 
 function fmtCurrencyPLN(val: number) {
@@ -54,18 +75,63 @@ function fmtCurrencyPLN(val: number) {
   });
 }
 
+function newClientKey(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    // @ts-ignore
+    return crypto.randomUUID();
+  }
+  return `ck_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function cls(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
+
 function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
   const supabase = useMemo(() => supabaseBrowser(), []);
+  const router = useRouter();
+  const pathname = usePathname();
+
+  /**
+   * ✅ GlobalToast czyta toast/tone z query string.
+   * Tu ustawiamy query BEZ ręcznego encodeURIComponent (URLSearchParams zrobi to poprawnie),
+   * oraz bierzemy aktualny query z window.location.search (pewniejsze niż useSearchParams).
+   */
+  function pushToast(message: string, tone: "ok" | "err" = "ok") {
+    try {
+      const next = new URLSearchParams(
+        typeof window !== "undefined" ? window.location.search : ""
+      );
+      next.set("toast", message);
+      next.set("tone", tone);
+
+      const qs = next.toString();
+      router.replace(qs ? `${pathname}?${qs}` : pathname);
+    } catch {
+      // ignore
+    }
+  }
 
   /* ----------------------------- GŁÓWNE POLA ----------------------------- */
-  const [date, setDate] = useState<string>("");
+  const [filledAtISO, setFilledAtISO] = useState<string>("");
+  const [deliveryDate, setDeliveryDate] = useState<string>("");
+
   const [place, setPlace] = useState<string>("");
   const [person, setPerson] = useState<string>("");
   const [supplier, setSupplier] = useState<string>("");
   const [deliveryCost, setDeliveryCost] = useState<string>("");
+
   const [materialsCost, setMaterialsCost] = useState<string>("");
+
   const [isUnpaid, setIsUnpaid] = useState(false);
   const [paymentDueDate, setPaymentDueDate] = useState<string>("");
+
+  /* ----------------------- LOKALIZACJA MAGAZYNOWA ------------------------ */
+  const [locations, setLocations] = useState<LocationOption[]>([]);
+  const [locationsLoading, setLocationsLoading] = useState(false);
+  const [locationOpen, setLocationOpen] = useState(false);
+  const [selectedLocationId, setSelectedLocationId] = useState<string>("");
+  const [selectedLocationLabel, setSelectedLocationLabel] = useState<string>("");
 
   /* -------------------------- ZAŁĄCZNIKI (FAKTURY) -------------------------- */
   const [invoiceFiles, setInvoiceFiles] = useState<File[]>([]);
@@ -77,24 +143,35 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
   const [materialsResults, setMaterialsResults] = useState<MaterialOption[]>([]);
   const [materialsLoading, setMaterialsLoading] = useState(false);
 
+  // ✅ guard na wyścigi odpowiedzi (stare requesty nie mogą nadpisać nowych wyników)
+  const materialsReqIdRef = useRef(0);
+
   /* --------------------------- STATUS / BŁĘDY / SAVE --------------------------- */
   const [step, setStep] = useState<Step>("form");
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
-  // kontekst usera
+  // kontekst usera (debug)
   const [userId, setUserId] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
 
-  const itemsTotal = items.reduce(
-    (sum, it) => sum + (it.qty || 0) * (it.unit_price || 0),
-    0
-  );
+  const itemsTotal = items.reduce((sum, it) => {
+    const qty = toNumInput(it.qty_input);
+    const price = toNumInput(it.unit_price_input);
+    return sum + qty * price;
+  }, 0);
+
+  const materialsAuto = itemsTotal;
+  const materialsVal = materialsAuto;
+
+  const deliveryVal =
+    deliveryCost && deliveryCost.trim() !== "" ? toNumInput(deliveryCost) : 0;
 
   /* --------------------------- AUTO: data + osoba --------------------------- */
   useEffect(() => {
-    if (!date) setDate(todayISO());
+    if (!filledAtISO) setFilledAtISO(todayISO());
+    if (!deliveryDate) setDeliveryDate(todayISO());
 
     (async () => {
       const {
@@ -120,9 +197,7 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
         .eq("id", user.id)
         .maybeSingle();
 
-      if (pErr) {
-        console.warn("NewDeliveryForm: users profile fetch error:", pErr);
-      }
+      if (pErr) console.warn("NewDeliveryForm: users profile fetch error:", pErr);
 
       const name =
         (prof as any)?.name?.trim?.() ||
@@ -136,17 +211,53 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* ------------------------ auto-hide success po 5s ------------------------ */
+  /* ---------------------- POBIERZ LOKALIZACJE (account) ---------------------- */
   useEffect(() => {
-    if (!successMsg) return;
-    const t = setTimeout(() => setSuccessMsg(null), 5000);
-    return () => clearTimeout(t);
-  }, [successMsg]);
+    (async () => {
+      setLocationsLoading(true);
+      try {
+        const { data: accountId, error: accErr } = await supabase.rpc(
+          "current_account_id"
+        );
+        if (accErr)
+          console.warn("NewDeliveryForm: current_account_id error:", accErr);
+
+        const q = supabase
+          .from("inventory_locations")
+          .select("id,label,account_id,deleted_at,materials!inner(id,deleted_at)")
+          .is("deleted_at", null)
+          .is("materials.deleted_at", null)
+          .order("label", { ascending: true })
+          .limit(200);
+
+        if (accountId) q.eq("account_id", accountId);
+
+        const { data, error } = await q;
+        if (error) {
+          console.warn("NewDeliveryForm: inventory_locations fetch error:", error);
+          setLocations([]);
+          return;
+        }
+
+        const mapped: LocationOption[] = ((data ?? []) as any[]).map((l) => ({
+          id: String(l.id),
+          label: String(l.label ?? ""),
+        }));
+
+        setLocations(mapped);
+      } finally {
+        setLocationsLoading(false);
+      }
+    })();
+  }, [supabase]);
 
   /* --------------------------- LIVE SEARCH MATERIAŁÓW --------------------------- */
   useEffect(() => {
     const q = materialsQuery.trim();
-    if (!q) {
+
+    if (!selectedLocationId || !q) {
+      // ✅ unieważnij wszystkie trwające requesty + wyczyść UI
+      materialsReqIdRef.current += 1;
       setMaterialsResults([]);
       setMaterialsLoading(false);
       return;
@@ -154,14 +265,20 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
 
     setMaterialsLoading(true);
 
+    const myReqId = ++materialsReqIdRef.current;
+
     const handle = setTimeout(async () => {
+      // ✅ szybki picker jak w daily reports: widok v_materials_picker (minimalne pola, szybkie)
       const { data, error } = await supabase
-        .from("v_materials_overview")
-        .select("id,title,unit,deleted_at")
+        .from("v_materials_picker")
+        .select("id,title,unit,inventory_location_id")
+        .eq("inventory_location_id", selectedLocationId)
         .ilike("title", `%${q}%`)
-        .is("deleted_at", null)
         .order("title", { ascending: true })
         .limit(20);
+
+      // ✅ jeśli w międzyczasie weszło nowe zapytanie, ignoruj tę odpowiedź
+      if (myReqId !== materialsReqIdRef.current) return;
 
       if (error) {
         console.warn("NewDeliveryForm: searchMaterials error:", error);
@@ -172,47 +289,82 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
       }
 
       const mapped: MaterialOption[] = ((data ?? []) as any[]).map((m) => ({
-        id: m.id as string,
-        title: m.title as string,
+        id: String(m.id),
+        title: String(m.title),
         unit: (m.unit as string) ?? null,
+        inventory_location_id: (m.inventory_location_id as string) ?? null,
       }));
 
       setMaterialsResults(mapped);
       setMaterialsLoading(false);
-    }, 300);
+    }, 250);
 
     return () => clearTimeout(handle);
-  }, [materialsQuery, supabase]);
+  }, [materialsQuery, selectedLocationId, supabase]);
+
+  /* ------------------------------ LOGIKA: LOKALIZACJE ------------------------------ */
+  function pickLocation(loc: LocationOption) {
+    setSelectedLocationId(loc.id);
+    setSelectedLocationLabel(loc.label || "—");
+    setLocationOpen(false);
+
+    setItems([]);
+    setMaterialsQuery("");
+    setMaterialsResults([]);
+    setMaterialsLoading(false);
+    setErrorMsg(null);
+    setSuccessMsg(null);
+
+    // ✅ unieważnij stare requesty po zmianie lokacji
+    materialsReqIdRef.current += 1;
+  }
 
   /* ------------------------------ LOGIKA MATERIAŁÓW ------------------------------ */
   function addItemFromMaterial(m: MaterialOption) {
-    setItems((prev) => [
-      ...prev,
-      { material_id: m.id, title: m.title, qty: 1, unit_price: 0 },
-    ]);
+    if (!selectedLocationId) {
+      setErrorMsg("Najpierw wybierz lokalizację.");
+      return;
+    }
+    if (m.inventory_location_id && m.inventory_location_id !== selectedLocationId) {
+      setErrorMsg("Ten materiał nie należy do wybranej lokalizacji.");
+      return;
+    }
 
-    // UX: po dodaniu czyścimy wyniki, żeby nie klikać przez przypadek
+    setItems((prev) => {
+      const idx = prev.findIndex((x) => x.material_id === m.id);
+      if (idx >= 0) {
+        return prev.map((it, i) => {
+          if (i !== idx) return it;
+          const nextQty = toNumInput(it.qty_input || "0") + 1;
+          return { ...it, qty_input: String(nextQty) };
+        });
+      }
+      return [
+        ...prev,
+        { material_id: m.id, title: m.title, qty_input: "1", unit_price_input: "" },
+      ];
+    });
+
     setMaterialsQuery("");
     setMaterialsResults([]);
+    setMaterialsLoading(false);
+    setErrorMsg(null);
+
+    // ✅ unieważnij stare requesty po dodaniu
+    materialsReqIdRef.current += 1;
   }
 
   function updateItemQty(index: number, qtyStr: string) {
-    const qty = Number((qtyStr || "0").replace(",", "."));
+    const next = normalizeDecimalInput(qtyStr);
     setItems((prev) =>
-      prev.map((it, i) =>
-        i === index ? { ...it, qty: Number.isNaN(qty) ? 0 : qty } : it
-      )
+      prev.map((it, i) => (i === index ? { ...it, qty_input: next } : it))
     );
   }
 
   function updateItemPrice(index: number, priceStr: string) {
-    const price = Number((priceStr || "0").replace(",", "."));
+    const next = normalizeDecimalInput(priceStr);
     setItems((prev) =>
-      prev.map((it, i) =>
-        i === index
-          ? { ...it, unit_price: Number.isNaN(price) ? 0 : price }
-          : it
-      )
+      prev.map((it, i) => (i === index ? { ...it, unit_price_input: next } : it))
     );
   }
 
@@ -277,32 +429,14 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
     setErrorMsg(null);
     setSuccessMsg(null);
 
-    if (!date.trim()) {
-      setErrorMsg("Brak daty dostawy (spróbuj odświeżyć stronę).");
-      return;
-    }
-    if (!person.trim()) {
-      setErrorMsg("Brak danych użytkownika (spróbuj odświeżyć stronę).");
-      return;
-    }
-    if (!place.trim()) {
-      setErrorMsg("Podaj miejsce (np. Plac A).");
-      return;
-    }
-    if (items.length === 0) {
-      setErrorMsg("Dodaj przynajmniej jedną pozycję materiałową.");
-      return;
-    }
-    if (isUnpaid && !paymentDueDate.trim()) {
-      setErrorMsg("Ustaw termin płatności dla nieopłaconej faktury.");
-      return;
-    }
+    if (!person.trim()) return setErrorMsg("Brak danych użytkownika (odśwież stronę).");
+    if (!place.trim()) return setErrorMsg("Podaj miejsce (np. Plac A).");
+    if (!selectedLocationId) return setErrorMsg("Wybierz lokalizację magazynową.");
+    if (items.length === 0) return setErrorMsg("Dodaj przynajmniej jedną pozycję.");
+    if (isUnpaid && !paymentDueDate.trim())
+      return setErrorMsg("Ustaw termin płatności dla nieopłaconej faktury.");
 
     setStep("summary");
-  }
-
-  function handleBackToForm() {
-    setStep("form");
   }
 
   /* ---------------------- KROK 2: ZATWIERDZENIE (INSERT + APPROVE + UPLOAD) ---------------------- */
@@ -319,32 +453,36 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
       if (userErr) console.warn("NewDeliveryForm: getUser error:", userErr);
       if (!user) throw new Error("Brak sesji użytkownika. Wyloguj się i zaloguj ponownie.");
 
-      const { data: accountId, error: accErr } = await supabase.rpc(
-        "current_account_id"
-      );
-
+      const { data: accountId, error: accErr } = await supabase.rpc("current_account_id");
       if (accErr) console.warn("NewDeliveryForm: current_account_id error:", accErr);
       if (!accountId) throw new Error("Brak wybranego konta. Wyloguj się i zaloguj ponownie.");
 
       const deliveryPayload: any = {
         account_id: accountId,
+        client_key: newClientKey(),
         created_by: user.id,
-        date: date || null,
+
+        date: deliveryDate && deliveryDate.trim() !== "" ? deliveryDate : null,
+
         place_label: place || null,
         person: person || null,
         supplier: supplier || null,
-        delivery_cost: deliveryCost ? toNumInput(deliveryCost) : 0,
-        materials_cost: materialsCost ? toNumInput(materialsCost) : itemsTotal,
-        invoice_url: null,
+
+        inventory_location_id: selectedLocationId || null,
+
+        delivery_cost: deliveryVal,
+        materials_cost: materialsVal,
+
         items: items.map((it) => ({
           material_id: it.material_id,
           title: it.title,
-          qty: it.qty,
-          unit_price: it.unit_price,
+          qty: toNumInput(it.qty_input),
+          unit_price: toNumInput(it.unit_price_input),
         })),
+
+        invoice_url: null,
         approved: false,
 
-        // płatność
         is_paid: isUnpaid ? false : true,
         payment_due_date: isUnpaid && paymentDueDate ? paymentDueDate : null,
       };
@@ -355,10 +493,7 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
         .select("id")
         .single();
 
-      if (insErr) {
-        console.error("insert delivery error:", insErr);
-        throw new Error("Nie udało się zapisać dostawy. Sprawdź dane i spróbuj ponownie.");
-      }
+      if (insErr) throw new Error(insErr.message || "Nie udało się zapisać dostawy.");
 
       const deliveryId = (ins as any)?.id as string | undefined;
       if (!deliveryId) throw new Error("Brak ID nowej dostawy z bazy.");
@@ -367,16 +502,21 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
         account_id: accountId,
         delivery_id: deliveryId,
         material_id: it.material_id,
-        quantity: it.qty,
+        quantity: toNumInput(it.qty_input),
+        unit_price: toNumInput(it.unit_price_input),
+        created_by: user.id,
       }));
 
       const itemsPayloadNoAccount = items.map((it) => ({
         delivery_id: deliveryId,
         material_id: it.material_id,
-        quantity: it.qty,
+        quantity: toNumInput(it.qty_input),
+        unit_price: toNumInput(it.unit_price_input),
+        created_by: user.id,
       }));
 
       let diErrFinal: any = null;
+
       const { error: diErr1 } = await supabase
         .from("delivery_items")
         .insert(itemsPayloadWithAccount);
@@ -398,8 +538,7 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
       }
 
       if (diErrFinal) {
-        console.error("insert delivery_items error:", diErrFinal);
-        // nie blokujemy flow — dostawa i tak ma legacy items w deliveries.items
+        console.warn("[NewDeliveryForm] delivery_items insert failed (non-blocking):", diErrFinal);
       }
 
       let firstInvoicePath: string | null = null;
@@ -413,34 +552,27 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
             deliveryId,
           });
 
-          if (uploadErr) {
-            console.warn("uploadInvoiceFile error:", uploadErr);
-            continue;
-          }
-
+          if (uploadErr) continue;
           if (!firstInvoicePath && path) firstInvoicePath = path;
         }
 
         if (firstInvoicePath) {
-          const { error: updErr } = await supabase
+          await supabase
             .from("deliveries")
             .update({ invoice_url: firstInvoicePath })
             .eq("id", deliveryId)
             .limit(1);
-
-          if (updErr) console.warn("update deliveries.invoice_url error:", updErr);
         }
       }
 
-      const { error: apprErr } = await supabase.rpc(
-        "add_delivery_and_update_stock",
-        { p_delivery_id: deliveryId }
-      );
+      const { error: apprErr } = await supabase.rpc("add_delivery_and_update_stock", {
+        p_delivery_id: deliveryId,
+      });
 
       if (apprErr) {
-        console.error("approve delivery rpc error:", apprErr);
         throw new Error(
-          "Dostawa zapisana, ale nie udało się jej zatwierdzić (aktualizacja stanów nie wykonana)."
+          apprErr.message ||
+            "Dostawa zapisana, ale nie udało się jej zatwierdzić (stany nie zaktualizowane)."
         );
       }
 
@@ -455,14 +587,27 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
       setItems([]);
       setMaterialsQuery("");
       setMaterialsResults([]);
-      setDate(todayISO());
-      setStep("form");
+      setMaterialsLoading(false);
 
+      setDeliveryDate(todayISO());
+
+      setStep("form");
       setSuccessMsg("Dostawa została zatwierdzona i wdrożona do stanów magazynowych.");
-      onDone?.();
+
+      /**
+       * ✅ Klucz: najpierw ustawiamy query (toast),
+       * potem zamykamy formularz (unmount).
+       * setTimeout(0) redukuje ryzyko wyścigu router.replace vs unmount.
+       */
+      pushToast("Dostawa została przyjęta do systemu.", "ok");
+      setTimeout(() => onDone?.(), 0);
     } catch (err: any) {
       console.error("NewDeliveryForm confirm error:", err);
-      setErrorMsg(err?.message || "Wystąpił nieoczekiwany błąd podczas zapisu dostawy.");
+      const m = err?.message || "Wystąpił nieoczekiwany błąd podczas zapisu dostawy.";
+      setErrorMsg(m);
+
+      // ✅ Błąd też przez global toast, ale formularza NIE zamykamy
+      pushToast(m, "err");
     } finally {
       setSaving(false);
     }
@@ -470,55 +615,61 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
 
   /* --------------------------------- RENDER --------------------------------- */
 
-  // KROK 2 – PODSUMOWANIE
   if (step === "summary") {
-    const materialsVal = materialsCost ? toNumInput(materialsCost) : itemsTotal;
-    const deliveryVal = deliveryCost ? toNumInput(deliveryCost) : 0;
-
     return (
       <div className="space-y-4">
         <div className="flex items-start justify-between gap-3">
-          <div>
+          <div className="min-w-0">
             <h2 className="text-sm font-medium">Podsumowanie dostawy</h2>
             <p className="text-xs opacity-70">
-              Sprawdź dane przed zatwierdzeniem. Zatwierdzenie zaktualizuje stany
-              magazynowe.
+              Sprawdź dane przed zatwierdzeniem. Zatwierdzenie zaktualizuje stany magazynowe.
             </p>
           </div>
-          <span className="text-[11px] px-2 py-1 rounded bg-background/60 border border-border">
+
+          <span className="shrink-0 text-[11px] px-2 py-1 rounded bg-background/60 border border-border">
             Krok 2/2
           </span>
         </div>
 
-        {/* META */}
         <div className="rounded-2xl border border-border bg-card p-4">
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-3 grid-cols-2 lg:grid-cols-3">
             <div className="grid gap-1">
-              <div className="text-xs opacity-60">Data</div>
-              <div className="text-sm font-medium">{date || "—"}</div>
+              <div className="text-xs opacity-60">Data dostawy</div>
+              <div className="text-sm font-medium break-words">{deliveryDate || "—"}</div>
             </div>
+
             <div className="grid gap-1">
               <div className="text-xs opacity-60">Miejsce</div>
-              <div className="text-sm font-medium">{place || "—"}</div>
+              <div className="text-sm font-medium break-words">{place || "—"}</div>
             </div>
+
+            <div className="grid gap-1">
+              <div className="text-xs opacity-60">Lokalizacja</div>
+              <div className="text-sm font-medium break-words">{selectedLocationLabel || "—"}</div>
+            </div>
+
             <div className="grid gap-1">
               <div className="text-xs opacity-60">Zgłaszający</div>
-              <div className="text-sm font-medium">{person || "—"}</div>
+              <div className="text-sm font-medium break-words">{person || "—"}</div>
             </div>
+
             <div className="grid gap-1">
               <div className="text-xs opacity-60">Dostawca</div>
-              <div className="text-sm font-medium">{supplier || "—"}</div>
+              <div className="text-sm font-medium break-words">{supplier || "—"}</div>
             </div>
+
             <div className="grid gap-1">
               <div className="text-xs opacity-60">Koszt dostawy</div>
               <div className="text-sm font-medium">{fmtCurrencyPLN(deliveryVal)}</div>
             </div>
+
             <div className="grid gap-1">
               <div className="text-xs opacity-60">Koszt materiałów</div>
               <div className="text-sm font-medium">{fmtCurrencyPLN(materialsVal)}</div>
+              <div className="text-[11px] opacity-60">Auto z pozycji</div>
             </div>
 
-            <div className="grid gap-1 sm:col-span-2 lg:col-span-3 pt-1">
+            <div className="grid gap-1 col-span-2 lg:col-span-2">
               <div className="text-xs opacity-60">Faktura</div>
               <div className="text-sm font-medium">
                 {isUnpaid
@@ -531,7 +682,6 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
           </div>
         </div>
 
-        {/* ZAŁĄCZNIKI */}
         <div className="rounded-2xl border border-border bg-card p-4 space-y-2">
           <div className="text-sm font-medium">Załączniki</div>
           {invoiceFiles.length === 0 ? (
@@ -544,18 +694,15 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
                   className="flex items-center justify-between gap-2 rounded border border-border bg-background/40 px-3 py-2"
                 >
                   <span className="text-sm truncate">{f.name}</span>
-                  <span className="text-[11px] opacity-70">
-                    {(f.size / 1024).toFixed(0)} KB
-                  </span>
+                  <span className="text-[11px] opacity-70">{(f.size / 1024).toFixed(0)} KB</span>
                 </li>
               ))}
             </ul>
           )}
         </div>
 
-        {/* POZYCJE */}
         <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-sm font-medium">Pozycje dostawy</div>
             <div className="text-xs opacity-70">
               Suma z pozycji:{" "}
@@ -567,30 +714,32 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
             <div className="text-xs opacity-70">Brak pozycji (wróć i popraw).</div>
           ) : (
             <div className="space-y-2">
-              {items.map((it, idx) => (
-                <div
-                  key={`${it.material_id}-${idx}`}
-                  className="rounded-xl border border-border bg-background/40 px-3 py-2 space-y-1"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="text-sm font-medium truncate">
-                      {it.title || "(brak nazwy)"}
+              {items.map((it, idx) => {
+                const qty = toNumInput(it.qty_input);
+                const price = toNumInput(it.unit_price_input);
+                return (
+                  <div
+                    key={`${it.material_id}-${idx}`}
+                    className="rounded-xl border border-border bg-background/40 px-3 py-2 space-y-1"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="text-sm font-medium min-w-0 truncate">
+                        {it.title || "(brak nazwy)"}
+                      </div>
+                      <div className="text-[11px] opacity-70 shrink-0">
+                        Razem:{" "}
+                        <span className="font-semibold">
+                          {fmtCurrencyPLN(qty * price)}
+                        </span>
+                      </div>
                     </div>
                     <div className="text-[11px] opacity-70">
-                      Razem:{" "}
-                      <span className="font-semibold">
-                        {fmtCurrencyPLN((it.qty || 0) * (it.unit_price || 0))}
-                      </span>
+                      Ilość: <span className="font-semibold">{qty}</span> · Cena:{" "}
+                      <span className="font-semibold">{fmtCurrencyPLN(price)}</span>
                     </div>
                   </div>
-                  <div className="text-[11px] opacity-70">
-                    Ilość: <span className="font-semibold">{it.qty}</span> · Cena:{" "}
-                    <span className="font-semibold">
-                      {fmtCurrencyPLN(it.unit_price || 0)}
-                    </span>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -601,45 +750,42 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
           </div>
         )}
 
-        <div className="flex items-center justify-between gap-3 pt-1">
-          <button
-            type="button"
-            onClick={handleBackToForm}
-            className="px-3 py-2 rounded border border-border bg-card hover:bg-card/80 text-sm transition"
-            disabled={saving}
-          >
-            Wróć
-          </button>
-
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between pt-1">
           <button
             type="button"
             onClick={handleConfirmSubmit}
             disabled={saving}
-            className="px-4 py-2 rounded border border-border bg-foreground text-background text-sm hover:bg-foreground/90 disabled:opacity-60 disabled:cursor-not-allowed transition"
+            className="w-full sm:w-auto px-4 py-2 rounded border border-border bg-foreground text-background text-sm hover:bg-foreground/90 disabled:opacity-60 disabled:cursor-not-allowed transition"
           >
             {saving ? "Zapisuję i zatwierdzam..." : "Zatwierdź dostawę"}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setStep("form")}
+            className="w-full sm:w-auto px-3 py-2 rounded border border-border bg-card hover:bg-card/80 text-sm transition"
+            disabled={saving}
+          >
+            Wróć
           </button>
         </div>
       </div>
     );
   }
 
-  // KROK 1 – FORMULARZ
   return (
     <form onSubmit={handleGoToSummary} className="grid gap-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h3 className="text-sm font-medium">Nowa dostawa</h3>
-          <p className="text-xs opacity-70">Wypełnij dane i przejdź do podsumowania.</p>
-        </div>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="text-sm font-medium">Nowa dostawa</div>
 
-        <div className="flex items-center gap-2">
-          {/* META w headerze (zamiast pól) */}
+        <div className="flex flex-wrap items-center gap-2">
           <span className="text-[11px] px-2 py-1 rounded bg-background/60 border border-border">
-            Data: <span className="font-semibold">{date || "—"}</span>
+            Data: <span className="font-semibold">{filledAtISO || "—"}</span>
           </span>
-          <span className="text-[11px] px-2 py-1 rounded bg-background/60 border border-border max-w-[220px] truncate">
-            Zgłaszający: <span className="font-semibold">{person || "—"}</span>
+
+          <span className="text-[11px] px-2 py-1 rounded bg-background/60 border border-border max-w-full">
+            <span className="opacity-70">Zgłaszający:</span>{" "}
+            <span className="font-semibold break-words">{person || "—"}</span>
           </span>
 
           <span className="text-[11px] px-2 py-1 rounded bg-background/60 border border-border">
@@ -648,7 +794,6 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
         </div>
       </div>
 
-      {/* GŁÓWNE DANE */}
       <div className="rounded-2xl border border-border bg-card p-4 space-y-4">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <div className="grid gap-2">
@@ -656,7 +801,7 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
             <input
               type="text"
               placeholder="np. Plac A"
-              className="h-10 border border-border bg-background rounded px-3"
+              className="h-10 w-full border border-border bg-background rounded px-3"
               value={place}
               onChange={(e) => setPlace(e.target.value)}
             />
@@ -667,42 +812,53 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
             <input
               type="text"
               placeholder="np. Castorama"
-              className="h-10 border border-border bg-background rounded px-3"
+              className="h-10 w-full border border-border bg-background rounded px-3"
               value={supplier}
               onChange={(e) => setSupplier(e.target.value)}
             />
           </div>
 
+          <div className="grid gap-2 min-w-0">
+            <label className="text-sm">Data dostawy</label>
+            <input
+              type="date"
+              className="h-10 w-full border border-border bg-background rounded px-3 text-left appearance-none"
+              value={deliveryDate}
+              onChange={(e) => setDeliveryDate(e.target.value)}
+            />
+          </div>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
           <div className="grid gap-2">
             <label className="text-sm">Koszt dostawy</label>
             <input
               type="text"
               inputMode="decimal"
               placeholder="np. 150"
-              className="h-10 border border-border bg-background rounded px-3"
+              className="h-10 w-full border border-border bg-background rounded px-3"
               value={deliveryCost}
-              onChange={(e) => setDeliveryCost(e.target.value)}
+              onChange={(e) => setDeliveryCost(normalizeDecimalInput(e.target.value))}
             />
           </div>
 
-          <div className="grid gap-2 sm:col-span-2 lg:col-span-3">
+          <div className="grid gap-2">
             <label className="text-sm">Koszt materiałów</label>
+            <div className="h-10 w-full border border-border bg-background/40 rounded px-3 text-sm flex items-center opacity-70 select-none">
+              {fmtCurrencyPLN(materialsAuto)}
+            </div>
+            <div className="text-[11px] opacity-60">Auto z pozycji (nie edytujesz ręcznie).</div>
+
             <input
-              type="text"
-              inputMode="decimal"
-              placeholder="jeśli puste, liczymy z pozycji"
-              className="h-10 border border-border bg-background rounded px-3"
+              type="hidden"
               value={materialsCost}
-              onChange={(e) => setMaterialsCost(e.target.value)}
+              onChange={() => {}}
+              readOnly
+              aria-hidden="true"
             />
-            <p className="text-[11px] opacity-70">
-              Obecnie suma z pozycji:{" "}
-              <span className="font-medium">{fmtCurrencyPLN(itemsTotal)}</span>
-            </p>
           </div>
         </div>
 
-        {/* FAKTURA / PŁATNOŚĆ (bez zbędnego nagłówka) */}
         <div className="pt-1 border-t border-border/70 space-y-2">
           <label className="inline-flex items-center gap-2 text-sm opacity-90">
             <input
@@ -717,37 +873,41 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
           {isUnpaid && (
             <div className="grid gap-2 sm:max-w-xs">
               <label className="text-sm">Termin płatności *</label>
-              <input
-                type="date"
-                className="h-10 border border-border bg-background rounded px-3"
-                value={paymentDueDate}
-                onChange={(e) => setPaymentDueDate(e.target.value)}
-              />
-              <p className="text-[11px] opacity-70">
-                Termin wymagany dla nieopłaconej faktury.
-              </p>
+
+              <div className="relative">
+                <input
+                  type="date"
+                  className="h-10 w-full border border-border bg-background rounded px-3 text-left appearance-none"
+                  value={paymentDueDate}
+                  onChange={(e) => setPaymentDueDate(e.target.value)}
+                />
+                {!paymentDueDate && (
+                  <div className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm opacity-60">
+                    Wybierz termin płatności…
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>
       </div>
 
-      {/* FAKTURY */}
       <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
-        <div>
+        <div className="flex items-center justify-between gap-3">
           <div className="text-sm font-medium">Faktury / dokumenty</div>
-          <div className="text-xs opacity-70">Max {MAX_INVOICE_FILES} pliki.</div>
+          <div className="text-[11px] opacity-70">Max {MAX_INVOICE_FILES} pliki</div>
         </div>
 
         <div
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
-          className={[
+          className={cls(
             "relative w-full rounded-xl border border-dashed px-3 py-4 text-sm",
             isDragging
               ? "border-foreground bg-background/40"
-              : "border-border bg-background/20 hover:bg-background/30",
-          ].join(" ")}
+              : "border-border bg-background/20 hover:bg-background/30"
+          )}
         >
           <input
             type="file"
@@ -757,8 +917,8 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
             onChange={(e) => addInvoiceFiles(e.target.files)}
           />
 
-          <div className="flex flex-col items-center justify-center gap-1 pointer-events-none">
-            <span className="opacity-90">Przeciągnij tutaj lub kliknij, aby wybrać.</span>
+          <div className="flex flex-col items-center justify-center gap-1 pointer-events-none text-center">
+            <span className="opacity-90">Przeciągnij tutaj lub kliknij, aby wybrać</span>
             <span className="text-xs opacity-60">PDF, obrazy, Excel…</span>
           </div>
         </div>
@@ -788,125 +948,187 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
             ))}
           </ul>
         )}
-
-        <p className="text-[11px] opacity-70">
-          Pliki zapisujemy do storage (bucket <code>invoices</code>) i przypinamy do dostawy.
-        </p>
       </div>
 
-      {/* POZYCJE */}
       <div className="rounded-2xl border border-border bg-card p-4 space-y-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="text-sm font-medium">Pozycje dostawy</div>
-            <div className="text-xs opacity-70">Dodaj materiały z katalogu.</div>
-          </div>
-
+        <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+          <div className="text-sm font-medium">Pozycje dostawy</div>
           <div className="text-xs opacity-70">
             Suma: <span className="font-semibold">{fmtCurrencyPLN(itemsTotal)}</span>
           </div>
         </div>
 
-        <div className="grid gap-2">
-          <label className="text-sm">Szukaj materiału</label>
-          <input
-            type="text"
-            placeholder="Wpisz nazwę…"
-            className="h-10 border border-border bg-background rounded px-3"
-            value={materialsQuery}
-            onChange={(e) => setMaterialsQuery(e.target.value)}
-          />
+        <div className="grid gap-2 relative">
+          <label className="text-sm">Lokalizacja magazynowa *</label>
+
+          <button
+            type="button"
+            onClick={() => setLocationOpen((v) => !v)}
+            className="h-10 w-full border border-border bg-background rounded px-3 text-left flex items-center justify-between gap-2"
+            disabled={locationsLoading}
+          >
+            <span className={selectedLocationId ? "text-sm" : "text-sm opacity-70"}>
+              {selectedLocationId ? selectedLocationLabel : "— wybierz lokalizację —"}
+            </span>
+            <span className="text-[11px] opacity-70">{locationsLoading ? "Ładuję…" : "▼"}</span>
+          </button>
+
+          {locationOpen && (
+            <div className="rounded-xl border border-border bg-background/20 p-2 space-y-1 max-h-[220px] overflow-auto">
+              {locations.length === 0 ? (
+                <div className="text-sm opacity-70 px-2 py-2">Brak lokalizacji na koncie.</div>
+              ) : (
+                locations.map((l) => (
+                  <button
+                    key={l.id}
+                    type="button"
+                    onClick={() => pickLocation(l)}
+                    className="w-full text-left px-3 py-2 rounded-lg hover:bg-background/40 transition flex items-center justify-between gap-2"
+                  >
+                    <span className="truncate">{l.label}</span>
+                    {selectedLocationId === l.id ? (
+                      <span className="text-[11px] opacity-70 border border-border rounded px-2 py-1 bg-card">
+                        wybrano
+                      </span>
+                    ) : null}
+                  </button>
+                ))
+              )}
+            </div>
+          )}
 
           <div className="text-[11px] opacity-70 min-h-[16px]">
-            {materialsLoading ? (
-              <span>Szukam…</span>
-            ) : materialsQuery.trim() && materialsResults.length === 0 ? (
-              <span>Brak wyników dla „{materialsQuery.trim()}”.</span>
+            {selectedLocationId ? (
+              <span>Materiały będą filtrowane tylko z tej lokalizacji.</span>
             ) : (
-              <span />
+              <span>Najpierw wybierz lokalizację, potem wyszukasz materiały.</span>
             )}
           </div>
         </div>
 
-        {materialsResults.length > 0 && (
-          <div className="rounded-xl border border-border bg-background/20 p-2 space-y-1 max-h-44 overflow-auto">
-            {materialsResults.map((m) => (
-              <button
-                key={m.id}
-                type="button"
-                onClick={() => addItemFromMaterial(m)}
-                className="w-full text-left px-3 py-2 rounded-lg hover:bg-background/40 transition flex items-center justify-between gap-2"
-              >
-                <span className="truncate">{m.title}</span>
-                {m.unit ? (
-                  <span className="text-[11px] opacity-70 border border-border rounded px-2 py-1 bg-card">
-                    {m.unit}
-                  </span>
-                ) : null}
-              </button>
-            ))}
-          </div>
-        )}
-
         {items.length === 0 ? (
           <div className="text-sm opacity-70">
-            Brak pozycji. Wyszukaj materiał i dodaj go do dostawy.
+            Brak pozycji.{" "}
+            {selectedLocationId
+              ? "Wyszukaj materiał i dodaj go do dostawy."
+              : "Wybierz lokalizację."}
           </div>
         ) : (
           <div className="space-y-3">
-            {items.map((it, idx) => (
-              <div
-                key={`${it.material_id}-${idx}`}
-                className="rounded-2xl border border-border bg-background/20 p-3 space-y-3"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="text-sm font-medium truncate">{it.title}</div>
-                  <button
-                    type="button"
-                    onClick={() => removeItem(idx)}
-                    className="text-sm opacity-70 hover:opacity-100 px-2 py-1 rounded hover:bg-background/40"
-                  >
-                    Usuń
-                  </button>
-                </div>
+            {items.map((it, idx) => {
+              const qty = toNumInput(it.qty_input);
+              const price = toNumInput(it.unit_price_input);
 
-                <div className="grid gap-3 sm:grid-cols-3">
-                  <div className="grid gap-2">
-                    <label className="text-sm">Ilość</label>
-                    <input
-                      type="text"
-                      inputMode="decimal"
-                      className="h-10 border border-border bg-background rounded px-3"
-                      value={Number.isFinite(it.qty) ? String(it.qty) : ""}
-                      onChange={(e) => updateItemQty(idx, e.target.value)}
-                    />
+              const dangerBtn =
+                "rounded-md border border-red-500/60 bg-red-500/10 px-3 py-1.5 text-[11px] text-red-200 hover:bg-red-500/20 active:bg-red-500/25 transition";
+
+              return (
+                <div
+                  key={`${it.material_id}-${idx}`}
+                  className="rounded-2xl border border-border bg-background/20 p-3 space-y-3"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="text-sm font-medium min-w-0 truncate">{it.title}</div>
+
+                    <button type="button" onClick={() => removeItem(idx)} className={dangerBtn}>
+                      Usuń
+                    </button>
                   </div>
 
-                  <div className="grid gap-2">
-                    <label className="text-sm">Cena jednostkowa</label>
-                    <input
-                      type="text"
-                      inputMode="decimal"
-                      className="h-10 border border-border bg-background rounded px-3"
-                      value={Number.isFinite(it.unit_price) ? String(it.unit_price) : ""}
-                      onChange={(e) => updateItemPrice(idx, e.target.value)}
-                    />
-                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="grid gap-1 min-w-0">
+                      <label className="text-[11px] opacity-70">Ilość</label>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        className="h-10 w-full border border-border bg-background rounded px-3 text-sm"
+                        value={it.qty_input}
+                        onChange={(e) => updateItemQty(idx, e.target.value)}
+                      />
+                    </div>
 
-                  <div className="grid gap-2">
-                    <label className="text-sm">Razem</label>
-                    <div className="h-10 border border-border bg-background rounded px-3 text-sm flex items-center">
-                      {fmtCurrencyPLN((it.qty * it.unit_price) || 0)}
+                    <div className="grid gap-1 min-w-0">
+                      <label className="text-[11px] opacity-70">Cena</label>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        className="h-10 w-full border border-border bg-background rounded px-3 text-sm"
+                        value={it.unit_price_input}
+                        onChange={(e) => updateItemPrice(idx, e.target.value)}
+                      />
+                    </div>
+
+                    <div className="grid gap-1 min-w-0">
+                      <label className="text-[11px] opacity-70">Razem</label>
+                      <div className="h-10 w-full border border-border bg-background/40 rounded px-3 text-sm flex items-center opacity-70 select-none">
+                        {fmtCurrencyPLN(qty * price)}
+                      </div>
                     </div>
                   </div>
                 </div>
+              );
+            })}
+          </div>
+        )}
+
+        {selectedLocationId && (
+          <div className="grid gap-2 pt-1">
+            <label className="text-sm">Szukaj materiału</label>
+            <input
+              type="text"
+              placeholder="Wpisz nazwę…"
+              className="h-10 w-full border border-border bg-background rounded px-3"
+              value={materialsQuery}
+              onChange={(e) => setMaterialsQuery(e.target.value)}
+            />
+
+            <div className="text-[11px] opacity-70 min-h-[16px]">
+              {materialsLoading ? (
+                <span>Szukam…</span>
+              ) : materialsQuery.trim() && materialsResults.length === 0 ? (
+                <span>Brak materiałów dla „{materialsQuery.trim()}”.</span>
+              ) : (
+                <span />
+              )}
+            </div>
+
+            {materialsResults.length > 0 && (
+              <div className="rounded-xl border border-border bg-background/20 p-2 space-y-1 max-h-[220px] overflow-auto">
+                {materialsResults.map((m) => {
+                  const already = items.some((x) => x.material_id === m.id);
+                  return (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => addItemFromMaterial(m)}
+                      className={cls(
+                        "w-full text-left px-3 py-2 rounded-lg transition flex items-center justify-between gap-2",
+                        already ? "bg-background/40 hover:bg-background/50" : "hover:bg-background/40"
+                      )}
+                      title={already ? "Już dodane — kliknij, aby zwiększyć ilość" : undefined}
+                    >
+                      <span className="truncate">{m.title}</span>
+                      <span className="flex items-center gap-2 shrink-0">
+                        {already ? (
+                          <span className="text-[11px] opacity-70 border border-border rounded px-2 py-1 bg-card">
+                            dodano
+                          </span>
+                        ) : null}
+                        {m.unit ? (
+                          <span className="text-[11px] opacity-70 border border-border rounded px-2 py-1 bg-card">
+                            {m.unit}
+                          </span>
+                        ) : null}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
-            ))}
+            )}
           </div>
         )}
       </div>
 
-      {/* KOMUNIKATY */}
       {errorMsg && (
         <div className="text-sm text-red-300 border border-red-500/40 rounded-2xl px-3 py-2 bg-red-500/10">
           {errorMsg}
@@ -918,12 +1140,11 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
         </div>
       )}
 
-      {/* SUBMIT */}
       <div className="flex items-center justify-end gap-2 pt-1">
         <button
           type="submit"
           disabled={saving}
-          className="px-4 py-2 rounded border border-border bg-foreground text-background text-sm hover:bg-foreground/90 disabled:opacity-60 disabled:cursor-not-allowed transition"
+          className="w-full sm:w-auto px-4 py-2 rounded border border-border bg-foreground text-background text-sm hover:bg-foreground/90 disabled:opacity-60 disabled:cursor-not-allowed transition"
         >
           {saving ? "Sprawdzam dane..." : "Przejdź do podsumowania"}
         </button>
@@ -933,7 +1154,6 @@ function NewDeliveryFormInner({ onDone }: { onDone?: () => void }) {
 }
 
 export default function NewDeliveryForm({ onDone }: { onDone?: () => void }) {
-  // Dostęp tylko: owner/manager/storeman (z backendu przez permissions)
   return (
     <RoleGuard allow={PERM.DELIVERIES_CREATE} silent>
       <NewDeliveryFormInner onDone={onDone} />

@@ -1,10 +1,20 @@
 // src/app/(app)/materials/[id]/page.tsx
-
 import { redirect } from "next/navigation";
 import { supabaseServer } from "@/lib/supabaseServer";
-import { updateMaterial, softDeleteMaterial, restoreMaterial } from "@/lib/actions";
+import {
+  updateMaterial,
+  setMaterialStockQty,
+  softDeleteMaterial,
+  restoreMaterial,
+} from "@/lib/actions";
 import { PERM } from "@/lib/permissions";
 import BackButton from "@/components/BackButton";
+import { fetchInventoryLocations } from "@/lib/queries/inventoryLocations";
+
+import TransferMaterialModalClient from "@/app/(app)/materials/[id]/_components/TransferMaterialModalClient";
+import ConfirmSaveClient from "@/app/(app)/materials/[id]/_components/ConfirmSaveClient";
+import ConfirmDangerClient from "@/app/(app)/materials/[id]/_components/ConfirmDangerClient";
+import MaterialImageUploaderClient from "@/app/(app)/materials/[id]/_components/MaterialImageUploaderClient";
 
 /* =========================    Permissions snapshot ========================= */
 
@@ -29,21 +39,17 @@ async function getSnapshot(): Promise<Snapshot> {
   const out: Snapshot = { role: null, permSet: new Set<string>() };
   if (!data) return out;
 
-  // Format A: { role, permissions } albo [ { role, permissions } ]
   const obj = Array.isArray(data) ? (data[0] ?? null) : data;
   if (obj && typeof obj === "object") {
     const a = obj as SnapshotA;
-    if (Array.isArray(a.permissions))
-      out.permSet = new Set(a.permissions.map((x) => String(x)));
+    if (Array.isArray(a.permissions)) out.permSet = new Set(a.permissions.map((x) => String(x)));
     if (typeof a.role === "string") out.role = a.role;
     if (typeof a.account_id === "string") out.account_id = a.account_id;
-    if (typeof a.current_account_id === "string")
-      out.current_account_id = a.current_account_id;
+    if (typeof a.current_account_id === "string") out.current_account_id = a.current_account_id;
 
     if (out.permSet.size > 0 || out.role) return out;
   }
 
-  // Format B: [{ key, allowed }]
   if (Array.isArray(data)) {
     const rows = data as any as SnapshotRow[];
     out.permSet = new Set(
@@ -60,7 +66,6 @@ async function getSnapshot(): Promise<Snapshot> {
 
 const has = (s: Set<string>, key: string) => s.has(key);
 
-// worker/foreman mają być read-only, niezależnie od ewentualnych błędów w permach
 function isReadOnlyRole(role: string | null) {
   const r = (role ?? "").toLowerCase();
   return r === "worker" || r === "foreman";
@@ -69,14 +74,14 @@ function isReadOnlyRole(role: string | null) {
 /* =========================    Helpers ========================= */
 
 const UNIT_OPTIONS = [
-  { value: "szt", label: "szt" },
-  { value: "paczka", label: "paczka" },
-  { value: "opak", label: "opak" },
-  { value: "kg", label: "kg" },
-  { value: "l", label: "l" },
-  { value: "m", label: "m" },
-  { value: "m2", label: "m²" },
-  { value: "m3", label: "m³" },
+  { value: "szt", label: "Sztuka (szt)" },
+  { value: "paczka", label: "Paczka (paczka)" },
+  { value: "opak", label: "Opakowanie (opak)" },
+  { value: "kg", label: "Kilogram (kg)" },
+  { value: "l", label: "Litr (l)" },
+  { value: "m", label: "Metr (m)" },
+  { value: "m2", label: "Metr kwadratowy (m²)" },
+  { value: "m3", label: "Metr sześcienny (m³)" },
 ] as const;
 
 function safeExt(name: string) {
@@ -98,6 +103,17 @@ function fmtWhen(iso: string | null | undefined) {
   });
 }
 
+function toNum(v: unknown) {
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  if (typeof v === "string") return Number(v) || 0;
+  return 0;
+}
+
+function pctOfBase(currentQty: number, baseQty: number) {
+  if (!Number.isFinite(currentQty) || !Number.isFinite(baseQty) || baseQty <= 0) return 0;
+  return Math.round((currentQty / baseQty) * 100);
+}
+
 /* =========================    Server Actions (GATED) ========================= */
 
 async function saveMaterial(formData: FormData) {
@@ -112,29 +128,35 @@ async function saveMaterial(formData: FormData) {
 
   const patch: Record<string, unknown> = {};
 
-  // text fields
-  for (const key of ["title", "description", "cta_url", "unit"] as const) {
+  for (const key of ["title", "description", "unit"] as const) {
     if (!formData.has(key)) continue;
     const v = formData.get(key);
     const str = v == null ? "" : String(v).trim();
     if (str === "") {
-      if (key === "description" || key === "cta_url") patch[key] = null;
+      if (key === "description") patch[key] = null;
       continue;
     }
     patch[key] = str;
   }
 
-  // numbers
-  for (const key of ["base_quantity", "current_quantity"] as const) {
+  for (const key of ["base_quantity"] as const) {
     if (!formData.has(key)) continue;
     const v = Number(formData.get(key));
     patch[key] = Number.isFinite(v) ? v : 0;
   }
 
+  if (formData.has("current_quantity")) {
+    const v = Number(formData.get("current_quantity"));
+    const newQty = Number.isFinite(v) ? v : 0;
+    await setMaterialStockQty(id, newQty, "Zmiana stanu z karty materiału");
+  }
+
   await updateMaterial(id, patch);
 
-  // ✅ feedback po zapisie (bez client state)
-  redirect(`/materials/${id}?saved=1`);
+  const p = new URLSearchParams();
+  p.set("toast", encodeURIComponent("Zmiany zostały zapisane."));
+  p.set("tone", "ok");
+  redirect(`/materials/${id}?${p.toString()}`);
 }
 
 async function uploadMaterialImage(formData: FormData) {
@@ -148,13 +170,19 @@ async function uploadMaterialImage(formData: FormData) {
   if (!id) return;
 
   const file = formData.get("image");
-  if (!(file instanceof File) || !file.size) return;
+  if (!(file instanceof File) || !file.size) {
+    const p = new URLSearchParams();
+    p.set("toast", encodeURIComponent("Wybierz zdjęcie (JPG/PNG/WEBP)."));
+    p.set("tone", "err");
+    redirect(`/materials/${id}?${p.toString()}`);
+  }
 
   const sb = await supabaseServer();
   const BUCKET = "material-images";
 
   let accountId: string | null =
     (snap as any)?.account_id || (snap as any)?.current_account_id || null;
+
   if (!accountId) {
     const { data: acc } = await sb.rpc("current_account_id");
     if (typeof acc === "string" && acc.length > 20) accountId = acc;
@@ -162,21 +190,27 @@ async function uploadMaterialImage(formData: FormData) {
 
   if (!accountId) {
     console.error("uploadMaterialImage: missing accountId");
-    return;
+    const p = new URLSearchParams();
+    p.set("toast", encodeURIComponent("Brak account_id — nie można zapisać zdjęcia."));
+    p.set("tone", "err");
+    redirect(`/materials/${id}?${p.toString()}`);
   }
 
-  const ext = safeExt(file.name);
+  const ext = safeExt((file as File).name);
   const fileName = `${Date.now()}.${ext}`;
   const path = `${accountId}/materials/${id}/${fileName}`;
 
-  const { error: upErr } = await sb.storage.from(BUCKET).upload(path, file, {
+  const { error: upErr } = await sb.storage.from(BUCKET).upload(path, file as File, {
     upsert: true,
-    contentType: file.type || "application/octet-stream",
+    contentType: (file as File).type || "application/octet-stream",
   });
 
   if (upErr) {
     console.error("uploadMaterialImage upload error:", upErr);
-    return;
+    const p = new URLSearchParams();
+    p.set("toast", encodeURIComponent("Nie udało się wgrać zdjęcia."));
+    p.set("tone", "err");
+    redirect(`/materials/${id}?${p.toString()}`);
   }
 
   const { data: pub } = sb.storage.from(BUCKET).getPublicUrl(path);
@@ -184,10 +218,36 @@ async function uploadMaterialImage(formData: FormData) {
 
   if (publicUrl) {
     await updateMaterial(id, { image_url: publicUrl });
-  } else {
-    await updateMaterial(id, { image_url: null });
-    console.warn("material-images bucket is not public; consider signed URLs");
+    const p = new URLSearchParams();
+    p.set("toast", encodeURIComponent("Zdjęcie zostało zapisane."));
+    p.set("tone", "ok");
+    redirect(`/materials/${id}?${p.toString()}`);
   }
+
+  await updateMaterial(id, { image_url: null });
+  console.warn("material-images bucket is not public; consider signed URLs");
+  const p = new URLSearchParams();
+  p.set("toast", encodeURIComponent("Bucket zdjęć nie jest publiczny — ustaw public lub signed URL."));
+  p.set("tone", "err");
+  redirect(`/materials/${id}?${p.toString()}`);
+}
+
+async function removeMaterialImage(formData: FormData) {
+  "use server";
+
+  const snap = await getSnapshot();
+  if (!has(snap.permSet, PERM.MATERIALS_WRITE)) return;
+  if (isReadOnlyRole(snap.role)) return;
+
+  const id = String(formData.get("id") || "");
+  if (!id) return;
+
+  await updateMaterial(id, { image_url: null });
+
+  const p = new URLSearchParams();
+  p.set("toast", encodeURIComponent("Zdjęcie zostało usunięte."));
+  p.set("tone", "ok");
+  redirect(`/materials/${id}?${p.toString()}`);
 }
 
 async function doDelete(formData: FormData) {
@@ -197,7 +257,14 @@ async function doDelete(formData: FormData) {
   if (isReadOnlyRole(snap.role)) return;
 
   const id = String(formData.get("id") || "");
-  if (id) await softDeleteMaterial(id);
+  if (!id) return;
+
+  await softDeleteMaterial(id);
+
+  const p = new URLSearchParams();
+  p.set("toast", encodeURIComponent("Materiał został usunięty."));
+  p.set("tone", "ok");
+  redirect(`/materials/${id}?${p.toString()}`);
 }
 
 async function doRestore(formData: FormData) {
@@ -207,7 +274,75 @@ async function doRestore(formData: FormData) {
   if (isReadOnlyRole(snap.role)) return;
 
   const id = String(formData.get("id") || "");
-  if (id) await restoreMaterial(id);
+  if (!id) return;
+
+  await restoreMaterial(id);
+
+  const p = new URLSearchParams();
+  p.set("toast", encodeURIComponent("Materiał został przywrócony."));
+  p.set("tone", "ok");
+  redirect(`/materials/${id}?${p.toString()}`);
+}
+
+async function transferFromMaterialCard(formData: FormData) {
+  "use server";
+
+  const snap = await getSnapshot();
+  if (!has(snap.permSet, PERM.MATERIALS_WRITE)) return;
+  if (isReadOnlyRole(snap.role)) return;
+
+  const from_material_id = String(formData.get("from_material_id") || "").trim();
+  const to_location_id = String(formData.get("to_location_id") || "").trim();
+  const qty = Number(formData.get("qty"));
+
+  if (!from_material_id || !to_location_id || !Number.isFinite(qty) || qty <= 0) {
+    const p = new URLSearchParams();
+    p.set("toast", encodeURIComponent("Nieprawidłowe dane transferu."));
+    p.set("tone", "err");
+    redirect(`/materials/${from_material_id}?${p.toString()}`);
+  }
+
+  const sb = await supabaseServer();
+
+  const { data: fromRow } = await sb
+    .from("materials")
+    .select("id,inventory_location_label,unit")
+    .eq("id", from_material_id)
+    .maybeSingle();
+
+  const { data: toLoc } = await sb
+    .from("inventory_locations")
+    .select("id,label")
+    .eq("id", to_location_id)
+    .maybeSingle();
+
+  const fromLabel = (fromRow as any)?.inventory_location_label ?? "—";
+  const toLabel = (toLoc as any)?.label ?? "—";
+  const unit = (fromRow as any)?.unit ?? "";
+
+  const clientKey = `matcard-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  const { error } = await sb.rpc("create_inventory_relocation", {
+    p_from_material_id: from_material_id,
+    p_to_location_id: to_location_id,
+    p_qty: qty,
+    p_note: "Transfer z karty materiału",
+    p_client_key: clientKey,
+  });
+
+  const p = new URLSearchParams();
+  if (error) {
+    p.set("toast", encodeURIComponent("Nie udało się wykonać transferu."));
+    p.set("tone", "err");
+    redirect(`/materials/${from_material_id}?${p.toString()}`);
+  }
+
+  p.set(
+    "toast",
+    encodeURIComponent(`Przeniesiono ${qty} ${unit} z „${fromLabel}” do „${toLabel}”.`)
+  );
+  p.set("tone", "ok");
+  redirect(`/materials/${from_material_id}?${p.toString()}`);
 }
 
 /* =========================    Page ========================= */
@@ -225,9 +360,11 @@ type MaterialRowBase = {
   base_quantity: number;
   current_quantity: number;
   image_url: string | null;
-  cta_url: string | null;
   created_at: string | null;
   deleted_at: string | null;
+
+  inventory_location_id: string | null;
+  inventory_location_label: string | null;
 };
 
 type MaterialRowWithDeletedBy = MaterialRowBase & {
@@ -241,14 +378,6 @@ type TeamMemberMini = {
   email: string | null;
 };
 
-function sp(
-  searchParams: { [key: string]: string | string[] | undefined } | undefined,
-  key: string
-) {
-  const v = searchParams?.[key];
-  return Array.isArray(v) ? v[0] : v;
-}
-
 async function fetchMaterialWithOptionalDeletedBy(
   sb: Awaited<ReturnType<typeof supabaseServer>>,
   id: string
@@ -256,7 +385,7 @@ async function fetchMaterialWithOptionalDeletedBy(
   const try1 = await sb
     .from("materials")
     .select(
-      "id,title,description,unit,base_quantity,current_quantity,image_url,cta_url,created_at,deleted_at,deleted_by"
+      "id,title,description,unit,base_quantity,current_quantity,image_url,created_at,deleted_at,deleted_by,inventory_location_id,inventory_location_label"
     )
     .eq("id", id)
     .maybeSingle();
@@ -270,15 +399,13 @@ async function fetchMaterialWithOptionalDeletedBy(
 
   const msg = String(try1.error.message || "");
   const missingColumn =
-    msg.toLowerCase().includes("column") &&
-    msg.toLowerCase().includes("deleted_by");
-  if (!missingColumn)
-    console.error("materials select (with deleted_by) error:", try1.error);
+    msg.toLowerCase().includes("column") && msg.toLowerCase().includes("deleted_by");
+  if (!missingColumn) console.error("materials select (with deleted_by) error:", try1.error);
 
   const try2 = await sb
     .from("materials")
     .select(
-      "id,title,description,unit,base_quantity,current_quantity,image_url,cta_url,created_at,deleted_at"
+      "id,title,description,unit,base_quantity,current_quantity,image_url,created_at,deleted_at,inventory_location_id,inventory_location_label"
     )
     .eq("id", id)
     .maybeSingle();
@@ -317,101 +444,89 @@ async function fetchDeletedByMember(
   return null;
 }
 
-function AutoHideSavedScript() {
-  const js = `
-(function(){
-  try {
-    var el = document.getElementById('materialSavedToast');
-    if (!el) return;
-    window.setTimeout(function(){
-      try {
-        el.style.transition = 'opacity 200ms ease';
-        el.style.opacity = '0';
-        window.setTimeout(function(){ el.remove(); }, 220);
-      } catch(e) {}
-    }, 5000);
-  } catch(e) {}
-})();`;
-  // eslint-disable-next-line react/no-danger
-  return <script dangerouslySetInnerHTML={{ __html: js }} />;
+async function fetchSameTitleRows(sb: Awaited<ReturnType<typeof supabaseServer>>, title: string) {
+  const { data, error } = await sb
+    .from("materials")
+    .select("id,inventory_location_id,inventory_location_label,current_quantity")
+    .eq("title", title)
+    .is("deleted_at", null);
+
+  if (error) return [];
+  return Array.isArray(data) ? data : [];
 }
 
-export default async function MaterialDetailsPage({ params, searchParams }: PageProps) {
+export default async function MaterialDetailsPage({ params }: PageProps) {
   const { id } = await params;
-  const spObj = searchParams ? await searchParams : undefined;
 
   const snap = await getSnapshot();
   if (!has(snap.permSet, PERM.MATERIALS_READ)) redirect("/");
 
-  const canWrite =
-    has(snap.permSet, PERM.MATERIALS_WRITE) && !isReadOnlyRole(snap.role);
-  const canSoftDelete =
-    has(snap.permSet, PERM.MATERIALS_SOFT_DELETE) && !isReadOnlyRole(snap.role);
+  const canWrite = has(snap.permSet, PERM.MATERIALS_WRITE) && !isReadOnlyRole(snap.role);
+  const canSoftDelete = has(snap.permSet, PERM.MATERIALS_SOFT_DELETE) && !isReadOnlyRole(snap.role);
 
   const sb = await supabaseServer();
   const { row: m } = await fetchMaterialWithOptionalDeletedBy(sb, id);
 
-  const saved = sp(spObj, "saved") === "1";
-
   if (!m) {
     return (
-      <div className="p-6 space-y-4">
+      <div className="space-y-4">
         <div className="flex items-center justify-end">
-          <BackButton className="inline-flex border border-border rounded px-3 py-2 bg-card hover:bg-card/80 text-sm" />
+          <BackButton className="card inline-flex items-center px-3 py-2 text-xs font-medium" />
         </div>
-        <p className="text-sm opacity-70">
-          Materiał nie istnieje albo nie masz do niego dostępu.
-        </p>
+        <p className="text-sm opacity-70">Materiał nie istnieje albo nie masz do niego dostępu.</p>
       </div>
     );
   }
 
-  const pct =
-    m.base_quantity > 0
-      ? Math.round((m.current_quantity / m.base_quantity) * 100)
-      : 0;
+  const pct = pctOfBase(toNum(m.current_quantity), toNum(m.base_quantity));
 
   const deletedByMember = m.deleted_at
     ? await fetchDeletedByMember(sb, (m as MaterialRowWithDeletedBy).deleted_by)
     : null;
 
-  const ctaHasUrl = Boolean((m.cta_url ?? "").trim());
+  const locations = await fetchInventoryLocations({ includeDeleted: false });
+  const sameTitleRows = await fetchSameTitleRows(sb, m.title);
+
+  const BTN_NEUTRAL =
+    "w-full px-3 py-2 rounded-md border border-border bg-card hover:bg-card/80 transition text-xs font-medium";
+  const BTN_RED =
+    "w-full px-3 py-2 rounded-md border border-red-500/40 bg-red-500/10 text-red-200 hover:bg-red-500/15 transition text-xs font-medium";
+  const BTN_GREEN =
+    "w-full px-3 py-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/15 transition text-xs font-medium";
 
   return (
-    <div className="p-6 space-y-6">
-      {/* Back po prawej, styl jak inne guziki, logika "wróć do miejsca" z BackButton */}
-      <div className="flex items-center justify-end">
-        <BackButton className="inline-flex border border-border rounded px-3 py-2 bg-card hover:bg-card/80 text-sm" />
+    <div className="space-y-6">
+      {/* header */}
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-2xl font-semibold truncate">{m.title}</div>
+
+          <div className="mt-1 text-sm opacity-70">
+            Lokacja: <b className="opacity-90">{m.inventory_location_label ?? "—"}</b>
+            {m.deleted_at ? <span className="ml-2 text-red-300">• usunięty</span> : null}
+          </div>
+
+          <div className="mt-1 text-xs opacity-60">
+            Utworzono: <span className="opacity-80">{fmtWhen(m.created_at)}</span>
+          </div>
+        </div>
+
+        <BackButton className="card inline-flex items-center px-3 py-2 text-xs font-medium" />
       </div>
 
-      {/* Feedback po zapisie — znika po 5s */}
-      {saved && (
-        <div
-          id="materialSavedToast"
-          className="border border-border rounded-xl bg-card px-4 py-3 text-sm"
-        >
-          ✅ Zmiany zostały zapisane.
-          <AutoHideSavedScript />
-        </div>
-      )}
-
-      {/* Deleted badge + meta */}
-      {m.deleted_at && (
-        <div className="space-y-2">
-          <div className="inline-block text-xs px-2 py-1 rounded bg-red-500/20 border border-red-500/40">
-            usunięty
-          </div>
-          <div className="text-xs opacity-70">
+      {/* deleted info */}
+      {m.deleted_at ? (
+        <div className="rounded-2xl border border-border bg-card p-4">
+          <div className="text-sm font-medium text-red-200">Materiał jest usunięty</div>
+          <div className="mt-2 text-xs opacity-75">
             <span className="opacity-80">Usunięto:</span> {fmtWhen(m.deleted_at)}
             {deletedByMember ? (
               <>
                 {" "}
-                <span className="opacity-50">·</span>{" "}
-                <span className="opacity-80">przez:</span>{" "}
+                <span className="opacity-50">·</span> <span className="opacity-80">przez:</span>{" "}
                 {deletedByMember.first_name || deletedByMember.last_name ? (
                   <span>
-                    {deletedByMember.first_name ?? ""}{" "}
-                    {deletedByMember.last_name ?? ""}
+                    {deletedByMember.first_name ?? ""} {deletedByMember.last_name ?? ""}
                   </span>
                 ) : (
                   <span>{deletedByMember.email ?? "nieznany"}</span>
@@ -420,81 +535,58 @@ export default async function MaterialDetailsPage({ params, searchParams }: Page
             ) : null}
           </div>
         </div>
-      )}
+      ) : null}
 
-      {/* Layout:
-          - mobile/tablet: stack (zdjęcie na górze)
-          - desktop: 2 kolumny
-          - LEWY BOX dopasowuje się do zawartości (nie jest rozciągany do prawego)
-      */}
-      <div className="grid gap-6 lg:grid-cols-[1fr_2fr] items-start">
-        {/* MINIATURA: zdjęcie zawsze 1:1, box rośnie/kurczy gdy details otwierasz/zamykasz */}
-        <div className="border border-border rounded-xl bg-card p-4 space-y-3">
-          <div className="aspect-square rounded bg-background/50 border border-border/60 overflow-hidden flex items-center justify-center text-xs opacity-60">
-            {m.image_url ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={m.image_url} className="w-full h-full object-cover" alt="" />
-            ) : (
-              "brak miniatury"
-            )}
-          </div>
+      <div className="grid gap-6 lg:grid-cols-[380px_1fr] items-start">
+        {/* left column */}
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
+            <div className="aspect-square rounded-xl bg-background/40 border border-border/60 overflow-hidden flex items-center justify-center text-xs opacity-60">
+              {m.image_url ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={m.image_url} className="w-full h-full object-cover" alt="" />
+              ) : (
+                "brak miniatury"
+              )}
+            </div>
 
-          {/* ✅ ZMIANA: tylko widok uploadu -> taki sam styl jak w modalu tasków,
-              ale informacja: można dodać tylko jedno zdjęcie */}
-          {canWrite && (
-            <details className="group border border-border/60 rounded-xl bg-background/20 overflow-hidden">
-              <summary className="cursor-pointer select-none px-4 py-3 text-xs font-semibold text-foreground/80 hover:bg-background/30 transition">
-                Dodaj / zmień zdjęcie
-              </summary>
+            {/* image: uploader OR remove */}
+            {canWrite ? (
+              m.image_url ? (
+                <div className="rounded-xl border border-border bg-background/20 p-3 space-y-2">
+                  {/* ✅ notka: usuń aby zmienić */}
+                  <div className="text-[11px] text-foreground/60">
+                    Aby zmienić zdjęcie, najpierw kliknij <b>Usuń zdjęcie</b>.
+                  </div>
 
-              <div className="p-4 space-y-2">
-                <div className="text-[11px] text-foreground/60">
-                  Możesz dodać tylko <strong>jedno</strong> zdjęcie.
+                  <form action={removeMaterialImage}>
+                    <input type="hidden" name="id" value={m.id} />
+                    <button className="w-full rounded-full border border-red-500/40 bg-red-500/10 text-red-200 px-5 py-2 text-[11px] font-semibold hover:bg-red-500/15 transition">
+                      Usuń zdjęcie
+                    </button>
+                  </form>
                 </div>
-
-                <form action={uploadMaterialImage} encType="multipart/form-data" className="space-y-2">
-                  <input type="hidden" name="id" value={m.id} />
-
-                  <input
-                    type="file"
-                    name="image"
-                    accept="image/*"
-                    className="hidden"
-                    id={`material-image-input-${m.id}`}
+              ) : (
+                // ✅ NOWY uploader z preview/usuń (jak na screenach)
+                <div className="rounded-xl border border-border bg-background/20 p-3">
+                  <MaterialImageUploaderClient
+                    materialId={m.id}
+                    disabled={!canWrite}
+                    action={uploadMaterialImage}
                   />
-
-                  <label
-                    htmlFor={`material-image-input-${m.id}`}
-                    className={[
-                      "block w-full rounded-xl border border-dashed border-border/70 bg-background/30 px-4 py-5",
-                      "text-[11px] text-center text-foreground/70 cursor-pointer",
-                      "hover:border-foreground/60 transition",
-                    ].join(" ")}
-                  >
-                    <div>Kliknij, aby wybrać zdjęcie.</div>
-                    <div className="mt-1 text-[10px] text-foreground/50">
-                      JPG/PNG/WEBP • 1 plik
-                    </div>
-                  </label>
-
-                  <button className="w-full rounded-full bg-foreground text-background px-5 py-2 text-[11px] font-semibold hover:bg-foreground/90 transition">
-                    Zapisz zdjęcie
-                  </button>
-                </form>
-
-                <div className="text-[10px] text-foreground/50">
-                  Po zapisie miniatura odświeży się po przeładowaniu strony (SSR).
                 </div>
-              </div>
-            </details>
-          )}
+              )
+            ) : null}
+          </div>
         </div>
 
-        {/* DANE */}
-        <div className="space-y-6">
+        {/* right column */}
+        <div className="space-y-4">
+          {/* ✅ TYLKO TEN FORM: zapis pól */}
           <form
+            id="materialSaveForm"
             action={saveMaterial}
-            className="border border-border rounded-xl bg-card p-4 space-y-4"
+            className="rounded-2xl border border-border bg-card p-4 space-y-4"
           >
             <input type="hidden" name="id" value={m.id} />
 
@@ -504,8 +596,15 @@ export default async function MaterialDetailsPage({ params, searchParams }: Page
                 name="title"
                 defaultValue={m.title}
                 disabled={!canWrite}
-                className="w-full border rounded px-3 py-2 bg-background disabled:opacity-60 hover:bg-foreground/5 transition"
+                className="w-full border border-border rounded-md px-3 py-2 bg-background disabled:opacity-60 hover:bg-foreground/5 transition"
               />
+            </div>
+
+            <div className="grid gap-2">
+              <label className="text-sm opacity-80">Lokacja</label>
+              <div className="text-sm border border-border rounded-md px-3 py-2 bg-background/40">
+                {m.inventory_location_label ?? "—"}
+              </div>
             </div>
 
             <div className="grid gap-2">
@@ -514,43 +613,46 @@ export default async function MaterialDetailsPage({ params, searchParams }: Page
                 name="description"
                 defaultValue={m.description ?? ""}
                 disabled={!canWrite}
-                className="w-full border rounded px-3 py-2 bg-background disabled:opacity-60 hover:bg-foreground/5 transition"
+                className="w-full border border-border rounded-md px-3 py-2 bg-background disabled:opacity-60 hover:bg-foreground/5 transition"
                 rows={3}
               />
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="grid gap-2">
-                <label className="text-sm opacity-80">Baza</label>
-                <input
-                  name="base_quantity"
-                  type="number"
-                  step="0.01"
-                  defaultValue={m.base_quantity}
-                  disabled={!canWrite}
-                  className="border rounded px-3 py-2 bg-background disabled:opacity-60 hover:bg-foreground/5 transition"
-                />
-              </div>
-
-              <div className="grid gap-2">
+            {/* Stan/Baza/Miara — mobile: 2 kolumny + miara pod spodem */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              <div className="grid gap-2 min-w-0">
                 <label className="text-sm opacity-80">Stan</label>
                 <input
                   name="current_quantity"
                   type="number"
-                  step="0.01"
-                  defaultValue={m.current_quantity}
+                  step="1"
+                  inputMode="numeric"
+                  defaultValue={Math.trunc(toNum(m.current_quantity))}
                   disabled={!canWrite}
-                  className="border rounded px-3 py-2 bg-background disabled:opacity-60 hover:bg-foreground/5 transition"
+                  className="w-full min-w-0 border border-border rounded-md px-2.5 py-2 bg-background disabled:opacity-60 hover:bg-foreground/5 transition"
                 />
               </div>
 
-              <div className="grid gap-2">
+              <div className="grid gap-2 min-w-0">
+                <label className="text-sm opacity-80">Baza</label>
+                <input
+                  name="base_quantity"
+                  type="number"
+                  step="1"
+                  inputMode="numeric"
+                  defaultValue={Math.trunc(toNum(m.base_quantity))}
+                  disabled={!canWrite}
+                  className="w-full min-w-0 border border-border rounded-md px-2.5 py-2 bg-background disabled:opacity-60 hover:bg-foreground/5 transition"
+                />
+              </div>
+
+              <div className="grid gap-2 min-w-0 col-span-2 sm:col-span-1">
                 <label className="text-sm opacity-80">Miara</label>
                 <select
                   name="unit"
                   defaultValue={m.unit ?? "szt"}
                   disabled={!canWrite}
-                  className="border rounded px-3 py-2 bg-background disabled:opacity-60 hover:bg-foreground/5 transition"
+                  className="w-full min-w-0 border border-border rounded-md px-2.5 py-2 bg-background disabled:opacity-60 hover:bg-foreground/5 transition"
                 >
                   {UNIT_OPTIONS.map((u) => (
                     <option key={u.value} value={u.value}>
@@ -561,99 +663,109 @@ export default async function MaterialDetailsPage({ params, searchParams }: Page
               </div>
             </div>
 
-            {/* CTA */}
-            <div className="grid gap-2">
-              <label className="text-sm opacity-80">Zamów</label>
+            {/* pasek */}
+            <div className="rounded-xl border border-border bg-background/20 p-3">
+              <div className="text-xs opacity-70">Stan</div>
+              <div className="mt-1 text-sm font-semibold">
+                {m.current_quantity} / {m.base_quantity} {m.unit}
+              </div>
+              <div className="mt-2 h-2 rounded bg-background/60 overflow-hidden">
+                <div
+                  className={`h-full ${pct <= 25 ? "bg-red-500/70" : "bg-foreground/70"}`}
+                  style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
+                />
+              </div>
+              <div className="mt-2 text-[11px] opacity-70">{pct}% bazy</div>
+            </div>
+          </form>
 
-              {ctaHasUrl ? (
-                <a
-                  href={m.cta_url as string}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center justify-center px-4 py-2 border rounded bg-foreground text-background hover:opacity-90 transition"
-                >
-                  Zamów ten produkt →
-                </a>
+          {/* ✅ AKCJE POZA FORMEM ZAPISU */}
+          <div className="rounded-2xl border border-border bg-card p-4 space-y-2">
+            <div className="text-sm font-medium">Akcje</div>
+
+            {/* mobile: 2 kolumny (Usuń/Transfer) + Save full-width pod spodem */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 items-center">
+              {/* Usuń / Przywróć */}
+              {canSoftDelete ? (
+                m.deleted_at ? (
+                  <form action={doRestore} className="w-full">
+                    <input type="hidden" name="id" value={m.id} />
+                    <button className={BTN_GREEN}>Przywróć</button>
+                  </form>
+                ) : (
+                  <form action={doDelete} className="w-full">
+                    <input type="hidden" name="id" value={m.id} />
+                    <ConfirmDangerClient
+                      disabled={!canSoftDelete}
+                      buttonLabel="Usuń"
+                      className={BTN_RED}
+                    />
+                  </form>
+                )
               ) : (
                 <button
                   type="button"
                   disabled
-                  className="inline-flex items-center justify-center px-4 py-2 border rounded bg-foreground/20 text-foreground/60 cursor-not-allowed"
-                  title="Brak linku do zakupu"
+                  className="w-full px-3 py-2 rounded-md border border-border bg-background/30 text-foreground/50 cursor-not-allowed text-xs font-medium"
                 >
-                  Zamów ten produkt →
+                  Usuń
                 </button>
               )}
 
-              {canWrite && (
-                <details className="group border border-border/60 rounded-lg bg-background/30">
-                  <summary className="cursor-pointer select-none px-3 py-2 text-sm opacity-80 hover:opacity-100 hover:bg-foreground/5 rounded-lg transition">
-                    Dodaj / zmień link
-                  </summary>
-                  <div className="p-3 pt-2 space-y-2">
-                    <input
-                      name="cta_url"
-                      type="url"
-                      defaultValue={m.cta_url ?? ""}
-                      placeholder="https://…"
-                      className="w-full border rounded px-3 py-2 bg-background hover:bg-foreground/5 transition"
-                    />
-                    <div className="text-xs opacity-60">
-                      Ten link będzie użyty przez przycisk „Zamów ten produkt”.
-                    </div>
-                  </div>
-                </details>
-              )}
+              {/* Transfer (zielony) */}
+              <div
+                className={[
+                  "[&>button]:w-full",
+                  "[&>button]:px-3 [&>button]:py-2",
+                  "[&>button]:rounded-md [&>button]:border",
+                  "[&>button]:border-emerald-500/40 [&>button]:bg-emerald-500/10",
+                  "[&>button]:text-emerald-200 [&>button]:hover:bg-emerald-500/15",
+                  "[&>button]:transition [&>button]:text-xs [&>button]:font-medium",
+                ].join(" ")}
+              >
+                <TransferMaterialModalClient
+                  canWrite={canWrite}
+                  materialId={m.id}
+                  fromLocationId={m.inventory_location_id}
+                  fromLocationLabel={m.inventory_location_label}
+                  unit={m.unit}
+                  fromQty={toNum(m.current_quantity)}
+                  locations={(locations ?? []).map((l: any) => ({
+                    id: String(l.id),
+                    label: String(l.label),
+                  }))}
+                  sameTitleRows={(sameTitleRows ?? []) as any}
+                  action={transferFromMaterialCard}
+                />
+              </div>
 
-              {!canWrite && (
-                <div className="text-xs opacity-60">
-                  Jeśli będzie ustawiony link — przycisk „Zamów” zadziała.
+              {/* Zapisz zmiany — full width na mobile */}
+              {canWrite ? (
+                <div className="col-span-2 sm:col-span-1">
+                  <ConfirmSaveClient
+                    formId="materialSaveForm"
+                    disabled={!canWrite}
+                    buttonLabel="Zapisz zmiany"
+                    className={BTN_NEUTRAL}
+                  />
                 </div>
-              )}
-            </div>
-
-            {canWrite && (
-              <div className="flex justify-end">
-                <button className="px-4 py-2 border rounded bg-foreground/10 hover:bg-foreground/15 transition">
+              ) : (
+                <button
+                  type="button"
+                  disabled
+                  className="col-span-2 sm:col-span-1 w-full px-3 py-2 rounded-md border border-border bg-background/30 text-foreground/50 cursor-not-allowed text-xs font-medium"
+                >
                   Zapisz zmiany
                 </button>
-              </div>
-            )}
-          </form>
-
-          {/* STAN */}
-          <div className="border border-border rounded-xl bg-card p-4 space-y-2">
-            <div className="text-sm">
-              Stan: {m.current_quantity} / {m.base_quantity} {m.unit} ({pct}%)
-            </div>
-            <div className="h-2 rounded bg-background/60 overflow-hidden">
-              <div
-                className={`h-full ${pct <= 25 ? "bg-red-500" : "bg-foreground"}`}
-                style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
-              />
+              )}
             </div>
           </div>
 
-          {/* DELETE / RESTORE */}
-          {canSoftDelete && (
-            <div className="flex gap-2">
-              {m.deleted_at ? (
-                <form action={doRestore}>
-                  <input type="hidden" name="id" value={m.id} />
-                  <button className="px-3 py-2 border rounded bg-green-600/20 hover:bg-green-600/25 transition">
-                    Przywróć
-                  </button>
-                </form>
-              ) : (
-                <form action={doDelete}>
-                  <input type="hidden" name="id" value={m.id} />
-                  <button className="px-3 py-2 border rounded bg-red-600/20 hover:bg-red-600/25 transition">
-                    Usuń
-                  </button>
-                </form>
-              )}
+          {!canWrite ? (
+            <div className="rounded-2xl border border-border bg-card p-4 text-sm opacity-75">
+              Ten użytkownik ma tryb <b>tylko do odczytu</b>.
             </div>
-          )}
+          ) : null}
         </div>
       </div>
     </div>

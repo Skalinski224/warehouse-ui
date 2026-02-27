@@ -1,7 +1,8 @@
 // src/components/team/ResendInviteButton.tsx
 "use client";
 
-import { useState, useTransition } from "react";
+import { useTransition } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { supabaseClient } from "@/lib/supabaseClient";
 import { useCan } from "@/components/RoleGuard";
 import { PERM } from "@/lib/permissions";
@@ -11,67 +12,77 @@ type Props = {
   email: string;
 };
 
+function pushToast(
+  router: ReturnType<typeof useRouter>,
+  pathname: string,
+  sp: URLSearchParams,
+  msg: string,
+  tone: "ok" | "err" = "ok"
+) {
+  const p = new URLSearchParams(sp.toString());
+  p.set("toast", encodeURIComponent(msg));
+  p.set("tone", tone);
+  router.replace(`${pathname}?${p.toString()}`);
+}
+
 export default function ResendInviteButton({ memberId, email }: Props) {
-  // ✅ tylko owner + manager
   const canResend = useCan(PERM.TEAM_INVITE);
   if (!canResend) return null;
 
+  const router = useRouter();
+  const pathname = usePathname();
+  const sp = useSearchParams();
+
   const [isPending, startTransition] = useTransition();
-  const [message, setMessage] = useState<string | null>(null);
 
   async function handleResend() {
-    setMessage(null);
-
     startTransition(async () => {
-      const supabase = supabaseClient();
+      try {
+        const supabase = supabaseClient();
 
-      // 1. RPC – generuje nowy invite_token
-      const { data, error } = await supabase.rpc("rotate_invite_token", {
-        p_member_id: memberId,
-      });
+        const { data, error } = await supabase.rpc("rotate_invite_token", {
+          p_member_id: memberId,
+        });
 
-      if (error) {
-        console.error("rotate_invite_token error:", error);
-        setMessage("Nie udało się wygenerować nowego tokenu.");
-        return;
+        if (error) {
+          console.error("rotate_invite_token error:", error);
+          pushToast(router, pathname, new URLSearchParams(sp.toString()), "Nie udało się wygenerować nowego zaproszenia.", "err");
+          return;
+        }
+
+        const token = (data as any)?.invite_token;
+        if (!token) {
+          pushToast(router, pathname, new URLSearchParams(sp.toString()), "Token nie został wygenerowany.", "err");
+          return;
+        }
+
+        const res = await fetch("/api/team/invite/resend", {
+          method: "POST",
+          body: JSON.stringify({ email, token }),
+          headers: { "Content-Type": "application/json" },
+        });
+
+        if (!res.ok) {
+          pushToast(router, pathname, new URLSearchParams(sp.toString()), "Nie udało się wysłać wiadomości e-mail.", "err");
+          return;
+        }
+
+        pushToast(router, pathname, new URLSearchParams(sp.toString()), "Zaproszenie wysłane ponownie.", "ok");
+      } catch (e) {
+        console.error("[ResendInviteButton] error:", e);
+        pushToast(router, pathname, new URLSearchParams(sp.toString()), "Wystąpił błąd podczas wysyłki zaproszenia.", "err");
       }
-
-      const token = data?.invite_token;
-      if (!token) {
-        setMessage("Token nie został wygenerowany.");
-        return;
-      }
-
-      // 2. Wyślij maila przez własne API
-      const res = await fetch("/api/team/invite/resend", {
-        method: "POST",
-        body: JSON.stringify({ email, token }),
-        headers: { "Content-Type": "application/json" },
-      });
-
-      if (!res.ok) {
-        setMessage("Nie udało się wysłać wiadomości e-mail.");
-        return;
-      }
-
-      setMessage("Zaproszenie wysłane ponownie!");
     });
   }
 
   return (
-    <div className="flex flex-col gap-1 text-xs">
-      <button
-        type="button"
-        onClick={handleResend}
-        disabled={isPending}
-        className="rounded-full border border-border/60 px-3 py-1 hover:bg-muted/60 disabled:opacity-50"
-      >
-        {isPending ? "Wysyłam..." : "Wyślij ponownie zaproszenie"}
-      </button>
-
-      {message && (
-        <span className="text-[11px] text-muted-foreground">{message}</span>
-      )}
-    </div>
+    <button
+      type="button"
+      onClick={handleResend}
+      disabled={isPending}
+      className="rounded-xl border border-border/70 bg-background/40 px-3 py-2 text-xs hover:bg-background/60 disabled:opacity-60"
+    >
+      {isPending ? "Wysyłam..." : "Wyślij ponownie zaproszenie"}
+    </button>
   );
 }

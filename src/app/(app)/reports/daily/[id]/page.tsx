@@ -1,6 +1,6 @@
-// src/app/(app)/reports/daily/[id]/page.tsx  (albo Twoja ścieżka – tu nie podałeś)
-import { notFound } from "next/navigation";
+// src/app/(app)/reports/daily/[id]/page.tsx
 import Link from "next/link";
+import { notFound } from "next/navigation";
 
 import { fetchDailyReportById } from "@/lib/queries/dailyReports";
 import type { DailyReportDetails } from "@/lib/dto";
@@ -8,18 +8,27 @@ import ReportPhotosLightbox from "@/components/ReportPhotosLightbox";
 import { getPermissionSnapshot } from "@/lib/currentUser";
 import { can, PERM } from "@/lib/permissions";
 import { supabaseServer } from "@/lib/supabaseServer";
-import BackButton from "@/components/BackButton";
 
 type PageProps = {
   params: { id: string };
 };
 
-function Tag({
+/* ------------------------------------------------------------------ */
+/* UI helpers                                                          */
+/* ------------------------------------------------------------------ */
+
+function cx(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
+
+function Badge({
   children,
   tone = "neutral",
+  className,
 }: {
   children: React.ReactNode;
   tone?: "neutral" | "ok" | "warn" | "bad";
+  className?: string;
 }) {
   const cls =
     tone === "ok"
@@ -31,41 +40,48 @@ function Tag({
       : "border-border bg-background/40 text-foreground/80";
 
   return (
-    <span className={`text-[10px] px-2 py-0.5 rounded border ${cls}`}>
+    <span
+      className={cx(
+        "text-[11px] px-2 py-1 rounded-full border whitespace-nowrap leading-none",
+        cls,
+        className
+      )}
+    >
       {children}
     </span>
   );
 }
 
-function Pill({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <span className="text-[11px] px-2 py-1 rounded bg-background/60 border border-border">
-      <span className="opacity-70">{label}:</span>{" "}
-      <span className="font-semibold opacity-100">{value}</span>
-    </span>
-  );
-}
-
-function KV({
+function Field({
   label,
   value,
-  tone,
+  strong,
 }: {
   label: string;
   value: React.ReactNode;
-  tone?: "neutral" | "ok" | "warn" | "bad";
+  strong?: boolean;
 }) {
   return (
-    <div className="flex items-center gap-2 flex-wrap">
-      <Tag tone={tone}>{label}</Tag>
-      <div className="text-sm">{value}</div>
+    <div className="min-w-0">
+      <div className="text-[11px] uppercase tracking-wide text-muted-foreground/90">
+        {label}
+      </div>
+      <div className={cx("text-[15px] leading-snug", strong && "font-semibold")}>
+        {value}
+      </div>
     </div>
   );
 }
 
-function StatusText(approved: boolean) {
-  return approved ? { text: "zaakceptowany", tone: "ok" as const } : { text: "oczekuje", tone: "warn" as const };
+function statusMeta(approved: boolean) {
+  return approved
+    ? { text: "zaakceptowane", tone: "ok" as const }
+    : { text: "zadanie w toku", tone: "warn" as const };
 }
+
+/* ------------------------------------------------------------------ */
+/* Photos (signed)                                                     */
+/* ------------------------------------------------------------------ */
 
 function isImagePath(p: string) {
   const s = String(p || "").toLowerCase();
@@ -95,6 +111,10 @@ async function toSignedUrls(paths: string[]): Promise<string[]> {
   return out;
 }
 
+/* ------------------------------------------------------------------ */
+/* Page                                                                */
+/* ------------------------------------------------------------------ */
+
 export default async function DailyReportDetailsPage({ params }: PageProps) {
   // ✅ Gate
   const snap = await getPermissionSnapshot();
@@ -111,6 +131,17 @@ export default async function DailyReportDetailsPage({ params }: PageProps) {
   const report: DailyReportDetails | null = await fetchDailyReportById(id);
   if (!report) notFound();
 
+  // ✅ inventory location label (source of truth from your query file)
+  // NOTE: fetchDailyReportById currently DOES NOT join inventory_locations.
+  // We keep UI ready for production by falling back to report.location when label is absent.
+  // If/when you add inventoryLocationLabel to DailyReportDetails, this will start showing it automatically.
+  const inventoryLocationLabel =
+  report.inventoryLocationLabel ||
+  report.location ||
+  "—";
+
+  const st = statusMeta(!!report.approved);
+
   const primaryCrew =
     report.crews.find((c) => c.isPrimary) ??
     (report.crewId
@@ -121,214 +152,218 @@ export default async function DailyReportDetailsPage({ params }: PageProps) {
 
   const signedPhotos = await toSignedUrls(report.images ?? []);
 
-  const st = StatusText(!!report.approved);
-
-  const placeLabel = report.place || "—";
-  const locationLabel = report.location || "—";
   const personLabel = report.person || "—";
+  const placeLabel = report.place || "—";
   const taskLabel = report.taskName || "—";
 
   return (
     <div className="space-y-4">
-      {/* HEADER (kanon) */}
-      <header className="flex flex-wrap items-start justify-between gap-3">
+      {/* HEADER */}
+      <header className="flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0">
-          <h1 className="text-sm font-medium">Raport: dzienne zużycie</h1>
+          <h1 className="text-base font-semibold">Raport dzienny</h1>
           <p className="text-xs opacity-70">
-            Szczegóły prac i zużycia materiałów dla wybranego dnia.
+            Szczegóły zużycia materiałów i wykonanych prac.
           </p>
         </div>
 
         <div className="flex items-center gap-2">
-          <Pill label="ID" value={`#${String(report.id ?? id).slice(0, 8)}`} />
-          <BackButton className="px-3 py-2 rounded border border-border bg-card hover:bg-card/80 text-xs transition" />
+          <Badge className="px-3" tone={st.tone}>
+            {st.text}
+          </Badge>
+          <Badge className="px-3">
+            ID #{String(report.id ?? id).slice(0, 8)}
+          </Badge>
         </div>
       </header>
 
-      {/* META BAR (pigułki “na tacy”) */}
-      <section className="rounded-2xl border border-border bg-card p-4 space-y-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <Pill label="DATA" value={report.date} />
-          <span className="inline-flex items-center gap-2">
-            <Tag>STATUS</Tag>
-            <Tag tone={st.tone}>{st.text}</Tag>
-          </span>
-          {report.isCompleted ? <Tag tone="ok">zadanie zakończone</Tag> : <Tag>zadanie w toku</Tag>}
-          <Pill label="POZYCJI" value={report.items.length} />
-          <Pill label="ZDJĘĆ" value={signedPhotos.length} />
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <Pill label="OSOBA" value={personLabel} />
-          <Pill label="LOKALIZACJA" value={locationLabel} />
-          <Pill label="MIEJSCE" value={placeLabel} />
-          <Pill label="GŁÓWNA BRYGADA" value={primaryCrew?.crewName ?? "—"} />
-          <Pill label="POMOCNICZE" value={secondaryCrews.length} />
-        </div>
-      </section>
-
-      {/* GRID: lewa info / prawa materiały (na dużych) */}
-      <section className="grid gap-4 lg:grid-cols-2">
-        {/* LEWA: Informacje + Zadanie + Uczestnicy */}
+      {/* MAIN GRID: LEFT (meta+task+photos) / RIGHT (materials) */}
+      <section className="grid gap-4 lg:grid-cols-2 items-start">
+        {/* LEFT */}
         <div className="space-y-4">
-          <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
-            <h2 className="text-sm font-medium">Informacje</h2>
+          {/* BIG META PANEL (one place, two columns on larger) */}
+          <section className="rounded-2xl border border-border bg-card p-4">
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="text-sm font-medium">Podstawowe informacje</div>
+                <div className="flex items-center gap-2">
+                  {/* Only two statuses you requested */}
+                  <Badge tone={st.tone}>
+                    {st.text}
+                  </Badge>
+                  {/* "task in progress" should be translucent yellow */}
+                  {!report.approved ? (
+                    <span className="hidden" />
+                  ) : null}
+                </div>
+              </div>
 
-            <div className="space-y-2">
-              <KV label="KIEDY" value={report.date} />
-              <KV label="KTO" value={personLabel} />
-              <KV label="GDZIE" value={locationLabel} />
-            </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Data" value={report.date || "—"} strong />
+                <Field label="Osoba" value={personLabel} strong />
 
-            <div className="pt-3 border-t border-border/70 space-y-2">
-              <KV label="BRYGADA GŁÓWNA" value={primaryCrew?.crewName ?? "—"} />
-              <KV
-                label="BRYGADY POMOCNICZE"
-                value={
-                  secondaryCrews.length === 0 ? (
-                    <span className="opacity-70">brak</span>
-                  ) : (
-                    <div className="flex flex-wrap gap-2">
-                      {secondaryCrews.map((c) => (
-                        <span
-                          key={c.crewId}
-                          className="inline-flex rounded-full border border-border px-2 py-0.5 text-xs"
-                        >
-                          {c.crewName || "(bez nazwy)"}
-                        </span>
-                      ))}
-                    </div>
-                  )
-                }
-              />
-            </div>
+                <Field label="Miejsce pracy" value={placeLabel} />
+                <Field label="Lokalizacja magazynowa" value={inventoryLocationLabel} />
 
-            <div className="pt-3 border-t border-border/70 space-y-2">
-              <KV
-                label="UCZESTNICY"
-                value={
-                  report.members.length === 0 ? (
-                    <span className="opacity-70">brak przypisanych członków</span>
-                  ) : (
-                    <div className="flex flex-wrap gap-2">
-                      {report.members.map((m) => (
-                        <span
-                          key={m.memberId}
-                          className="inline-flex rounded-full border border-border px-2 py-0.5 text-xs"
-                        >
-                          {m.firstName} {m.lastName ?? ""}
-                        </span>
-                      ))}
-                    </div>
-                  )
-                }
-              />
-            </div>
-          </div>
+                <Field label="Brygada główna" value={primaryCrew?.crewName ?? "—"} />
+                <Field label="Brygady pomocnicze" value={secondaryCrews.length} />
 
-          <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
-            <h2 className="text-sm font-medium">Zadanie</h2>
+                <Field label="Ilość pozycji" value={report.items.length} />
+                <Field label="Ilość zdjęć" value={signedPhotos.length} />
+              </div>
 
-            <div className="space-y-2">
-              <KV
-                label="CO"
-                value={
-                  report.taskId ? (
-                    <Link
-                      href={`/tasks/${report.taskId}`}
-                      className="underline underline-offset-2 hover:opacity-100 opacity-90"
-                    >
-                      {taskLabel}
-                    </Link>
-                  ) : (
-                    taskLabel
-                  )
-                }
-              />
-
-              <KV
-                label="MIEJSCE / ETAP"
-                value={
-                  <span>
-                    {placeLabel}
-                    {report.stageId ? (
-                      <span className="text-xs opacity-70"> (etap: {report.stageId})</span>
-                    ) : null}
+              {/* translucent yellow pill as “zadanie w toku” (separate, always visible if not approved) */}
+              {!report.approved ? (
+                <div className="mt-1">
+                  <span className="inline-flex items-center rounded-full border border-amber-500/40 bg-amber-600/10 px-3 py-1 text-[12px] text-amber-200">
+                    zadanie w toku
                   </span>
-                }
-              />
+                </div>
+              ) : null}
+
+              {/* secondary crews list - clean */}
+              {secondaryCrews.length > 0 ? (
+                <div className="pt-3 border-t border-border/70">
+                  <div className="text-[11px] uppercase tracking-wide text-muted-foreground/90 mb-2">
+                    Brygady pomocnicze (nazwy)
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {secondaryCrews.map((c) => (
+                      <span
+                        key={c.crewId}
+                        className="inline-flex rounded-full border border-border px-2 py-0.5 text-xs"
+                      >
+                        {c.crewName || "(bez nazwy)"}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
             </div>
-          </div>
+          </section>
+
+          {/* TASK PANEL + PHOTOS inside same area (below meta) */}
+          <section className="rounded-2xl border border-border bg-card p-4 space-y-4">
+            <div className="space-y-1">
+              <div className="text-sm font-medium">Zadanie</div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field
+                  label="Nazwa zadania"
+                  value={
+                    report.taskId ? (
+                      <Link
+                        href={`/tasks/${report.taskId}`}
+                        className="underline underline-offset-2 hover:opacity-100 opacity-90"
+                      >
+                        {taskLabel}
+                      </Link>
+                    ) : (
+                      taskLabel
+                    )
+                  }
+                  strong
+                />
+                <Field
+                  label="Etap (ID)"
+                  value={report.stageId ? String(report.stageId) : "—"}
+                />
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-border/70 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-sm font-medium">Zdjęcia</div>
+                <Badge>{signedPhotos.length} szt.</Badge>
+              </div>
+
+              {signedPhotos.length === 0 ? (
+                <div className="rounded-2xl border border-border bg-background/30 p-4 text-sm opacity-70">
+                  Brak zdjęć w tym raporcie.
+                </div>
+              ) : (
+                <ReportPhotosLightbox photos={signedPhotos} />
+              )}
+            </div>
+          </section>
         </div>
 
-        {/* PRAWA: Materiały */}
-        <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
-          <div className="flex items-center justify-between gap-2">
-            <h2 className="text-sm font-medium">Zużyte materiały</h2>
-            <Pill label="POZYCJI" value={report.items.length} />
+        {/* RIGHT: MATERIALS (keep current “informational layout”, but cleaned + production) */}
+        <section className="rounded-2xl border border-border bg-card p-4 space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h2 className="text-sm font-medium">
+                Zużyte materiały{" "}
+                <span className="text-xs opacity-70">
+                  ( {inventoryLocationLabel} )
+                </span>
+              </h2>
+              <div className="text-xs opacity-70">Pozycje: {report.items.length}</div>
+            </div>
+            <Badge>pozycji: {report.items.length}</Badge>
           </div>
 
           {report.items.length === 0 ? (
             <div className="rounded-2xl border border-border bg-background/30 p-4 text-sm opacity-70">
-              W tym raporcie nie odnotowano zużycia materiałów.
+              Brak zużyć w tym raporcie.
             </div>
           ) : (
-            <div className="overflow-hidden rounded-2xl border border-border/60">
-              <table className="w-full border-collapse text-sm">
-                <thead className="bg-background/40 text-[11px] uppercase tracking-wide text-muted-foreground">
-                  <tr>
-                    <th className="px-3 py-2 text-left">Materiał</th>
-                    <th className="px-3 py-2 text-left">Jedn.</th>
-                    <th className="px-3 py-2 text-right">Zużycie</th>
-                    <th className="px-3 py-2 text-right">Stan po</th>
-                    <th className="px-3 py-2 text-right text-[11px]">Stan przed</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {report.items.map((item) => {
-                    const after = item.currentQuantity ?? 0;
-                    const before = after + item.qtyUsed;
+            <div className="space-y-2">
+              {report.items.map((item) => {
+                const after = item.currentQuantity ?? 0;
+                const before = after + item.qtyUsed;
 
-                    return (
-                      <tr key={item.materialId} className="border-t border-border/60">
-                        <td className="px-3 py-2">
-                          <div className="text-sm">
-                            {item.materialTitle || "Nieznany materiał"}
-                          </div>
-                        </td>
-                        <td className="px-3 py-2">
-                          {item.unit || <span className="text-xs opacity-70">—</span>}
-                        </td>
-                        <td className="px-3 py-2 text-right">
-                          <span className="sm:hidden opacity-60 mr-1">ZUŻYCIE:</span>
-                          <span className="font-medium">{item.qtyUsed}</span>
-                        </td>
-                        <td className="px-3 py-2 text-right">{after}</td>
-                        <td className="px-3 py-2 text-right text-xs opacity-70">{before}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                return (
+                  <Link
+                    key={item.materialId}
+                    href={`/materials/${item.materialId}`}
+                    className={cx(
+                      "block rounded-2xl border border-border bg-background/20 hover:bg-background/30 transition",
+                      "p-3"
+                    )}
+                  >
+                    {/* header */}
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-[15px] font-semibold truncate">
+                          {item.materialTitle || "Nieznany materiał"}
+                        </div>
+                        <div className="text-xs opacity-70 mt-0.5">
+                          Jednostka: {item.unit || "—"}
+                        </div>
+                      </div>
+
+                      <div className="shrink-0 text-right">
+                        <div className="text-[11px] uppercase tracking-wide text-muted-foreground/90">
+                          Zużyto
+                        </div>
+                        <div className="text-[16px] font-semibold leading-none">
+                          {item.qtyUsed}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* details row (not cramped) */}
+                    <div className="mt-2 grid grid-cols-2 gap-2 text-sm">
+                      <div className="rounded-xl border border-border bg-background/30 px-3 py-2">
+                        <div className="text-[11px] uppercase tracking-wide text-muted-foreground/90">
+                          Stan przed
+                        </div>
+                        <div className="text-[14px] font-semibold">{before}</div>
+                      </div>
+
+                      <div className="rounded-xl border border-border bg-background/30 px-3 py-2">
+                        <div className="text-[11px] uppercase tracking-wide text-muted-foreground/90">
+                          Stan po
+                        </div>
+                        <div className="text-[14px] font-semibold">{after}</div>
+                      </div>
+                    </div>
+                  </Link>
+                );
+              })}
             </div>
           )}
-
-          {/* ZDJĘCIA */}
-          <div className="pt-3 border-t border-border/70 space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="text-sm font-medium">Zdjęcia</h2>
-              <Pill label="SZT." value={signedPhotos.length} />
-            </div>
-
-            {signedPhotos.length === 0 ? (
-              <div className="rounded-2xl border border-border bg-background/30 p-4 text-sm opacity-70">
-                Do tego raportu nie dodano zdjęć.
-              </div>
-            ) : (
-              <ReportPhotosLightbox photos={signedPhotos} />
-            )}
-          </div>
-        </div>
+        </section>
       </section>
     </div>
   );

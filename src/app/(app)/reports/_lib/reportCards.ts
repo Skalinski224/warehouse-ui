@@ -6,6 +6,10 @@ export const MATERIALS_AUDIT_READ =
   (PERM as any).MATERIALS_CHANGES_READ ??
   "materials.audit.read";
 
+// ✅ fallback dla transferów (bo PERM może nie mieć stałej)
+export const REPORTS_TRANSFERS_READ =
+  (PERM as any).REPORTS_TRANSFERS_READ ?? "reports.transfers.read";
+
 export const REPORT_CARDS = [
   {
     href: "/reports/deliveries",
@@ -32,13 +36,13 @@ export const REPORT_CARDS = [
     perm: PERM.REPORTS_ITEMS_READ,
   },
 
-  // ❌ USUNIĘTE z /reports:
-  // {
-  //   href: "/reports/plan-vs-reality",
-  //   title: "Projektant vs rzeczywistość",
-  //   desc: "Założenia vs wykonanie",
-  //   perm: PERM.METRICS_READ,
-  // },
+  // ✅ transfery (teraz pewne, że perm nie będzie undefined)
+  {
+    href: "/reports/transfers",
+    title: "Transfery",
+    desc: "Raporty przeniesień między lokalizacjami",
+    perm: REPORTS_TRANSFERS_READ as any,
+  },
 
   {
     href: "/reports/inventory",
@@ -47,7 +51,6 @@ export const REPORT_CARDS = [
     perm: PERM.REPORTS_INVENTORY_READ,
   },
 
-  // ✅ raport zmian materiałów: TYLKO owner + manager
   {
     href: "/reports/materials-changes",
     title: "Zmiany w materiałach",

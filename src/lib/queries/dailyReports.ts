@@ -3,10 +3,6 @@ import { supabaseServer } from "@/lib/supabaseServer";
 import type { DailyReportRow, DailyReportDetails } from "@/lib/dto";
 import { PERM, can } from "@/lib/permissions";
 
-/* -------------------------------------------------------------------------- */
-/*                               PERMISSION GATE                              */
-/* -------------------------------------------------------------------------- */
-
 async function getSnapshot() {
   const supabase = await supabaseServer();
   const { data, error } = await supabase.rpc("my_permissions_snapshot");
@@ -24,20 +20,14 @@ async function canSeeReportPhotos(): Promise<boolean> {
   return can(snapshot, PERM.TASKS_UPLOAD_PHOTOS);
 }
 
-/* -------------------------------------------------------------------------- */
-/*                           LISTA RAPORTÓW DZIENNYCH                          */
-/* -------------------------------------------------------------------------- */
-
 export async function fetchDailyReports(): Promise<DailyReportRow[]> {
-  // Gate: dzienne raporty
   const allowed = await canReadDailyReports();
   if (!allowed) return [];
 
   const showPhotos = await canSeeReportPhotos();
-
   const supabase = await supabaseServer();
 
-  // 1. Bazowe dane z daily_reports
+  // ✅ dociągamy inventory_location_id + label (join po FK)
   const { data, error } = await supabase
     .from("daily_reports")
     .select(
@@ -48,6 +38,9 @@ export async function fetchDailyReports(): Promise<DailyReportRow[]> {
       crew_name,
       person,
       location,
+      place,
+      inventory_location_id,
+      inventory_locations:inventory_location_id ( label ),
       is_completed,
       approved,
       photos_count,
@@ -63,18 +56,13 @@ export async function fetchDailyReports(): Promise<DailyReportRow[]> {
   }
 
   const rows: any[] = data ?? [];
-  if (rows.length === 0) {
-    return [];
-  }
+  if (rows.length === 0) return [];
 
   const reportIds = rows.map((r) => r.id as string);
   const crewIdsFromReports = rows
     .map((r) => r.crew_id as string | null)
     .filter((id): id is string => !!id);
 
-  // 2. Dociągamy:
-  //    a) główne brygady z daily_report_crews
-  //    b) nazwy brygad z tabeli crews (dla crew_id z daily_reports)
   const [crewLinksRes, crewsRes] = await Promise.all([
     supabase
       .from("daily_report_crews")
@@ -94,10 +82,7 @@ export async function fetchDailyReports(): Promise<DailyReportRow[]> {
   ]);
 
   if (crewLinksRes.error) {
-    console.error(
-      "[fetchDailyReports] daily_report_crews error:",
-      crewLinksRes.error
-    );
+    console.error("[fetchDailyReports] daily_report_crews error:", crewLinksRes.error);
   }
   if ((crewsRes as any).error) {
     console.error("[fetchDailyReports] crews error:", (crewsRes as any).error);
@@ -106,7 +91,6 @@ export async function fetchDailyReports(): Promise<DailyReportRow[]> {
   const crewLinks: any[] = crewLinksRes.data ?? [];
   const crews: any[] = (crewsRes as any).data ?? [];
 
-  // report_id -> główna brygada (z daily_report_crews)
   const primaryCrewByReport = new Map<
     string,
     { crewId: string | null; crewName: string | null }
@@ -119,32 +103,23 @@ export async function fetchDailyReports(): Promise<DailyReportRow[]> {
     const isPrimary = !!link.is_primary;
 
     const existing = primaryCrewByReport.get(reportId);
-
-    // preferujemy is_primary = true, ale jak nie ma, bierzemy cokolwiek
     if (!existing || isPrimary) {
       primaryCrewByReport.set(reportId, { crewId, crewName });
     }
   });
 
-  // crew_id -> name (tabela crews)
   const crewNameById = new Map<string, string>();
   crews.forEach((c) => {
-    if (c.id) {
-      crewNameById.set(c.id as string, (c.name ?? "") as string);
-    }
+    if (c.id) crewNameById.set(c.id as string, (c.name ?? "") as string);
   });
 
-  // 3. Składamy finalne DTO:
-  //    1) daily_reports.crew_name
-  //    2) główna brygada z daily_report_crews
-  //    3) nazwa z tabeli crews po crew_id
   return rows.map((row) => {
     const reportId = row.id as string;
 
     const primaryCrew = primaryCrewByReport.get(reportId);
-    let crewId = (row.crew_id ?? primaryCrew?.crewId ?? null) as string | null;
+    const crewId = (row.crew_id ?? primaryCrew?.crewId ?? null) as string | null;
 
-    let crewName =
+    const crewName =
       (row.crew_name as string | null) ??
       (primaryCrew?.crewName as string | null) ??
       (crewId ? crewNameById.get(crewId) ?? null : null) ??
@@ -156,7 +131,13 @@ export async function fetchDailyReports(): Promise<DailyReportRow[]> {
       crewId,
       crewName,
       person: row.person as string,
+
       location: (row.location ?? null) as string | null,
+      place: (row.place ?? null) as string | null,
+
+      inventoryLocationId: (row.inventory_location_id ?? null) as string | null,
+      inventoryLocationLabel: (row.inventory_locations?.label ?? null) as string | null,
+
       isCompleted: !!row.is_completed,
       approved: !!row.approved,
       photosCount: showPhotos ? (row.photos_count ?? 0) : 0,
@@ -165,21 +146,14 @@ export async function fetchDailyReports(): Promise<DailyReportRow[]> {
   });
 }
 
-/* -------------------------------------------------------------------------- */
-/*                         SZCZEGÓŁY POJEDYNCZEGO RAPORTU                     */
-/* -------------------------------------------------------------------------- */
-
-export async function fetchDailyReportById(
-  id: string
-): Promise<DailyReportDetails | null> {
-  // Gate: dzienne raporty
+export async function fetchDailyReportById(id: string): Promise<DailyReportDetails | null> {
   const allowed = await canReadDailyReports();
   if (!allowed) return null;
 
   const showPhotos = await canSeeReportPhotos();
-
   const supabase = await supabaseServer();
 
+  // ✅ TU DOPINAMY inventory_location_id + label (join po FK) — to jest brakujący element
   const { data: report, error } = await supabase
     .from("daily_reports")
     .select(
@@ -191,6 +165,10 @@ export async function fetchDailyReportById(
       person,
       location,
       place,
+
+      inventory_location_id,
+      inventory_locations:inventory_location_id ( label ),
+
       stage_id,
       task_id,
       task_name,
@@ -205,9 +183,7 @@ export async function fetchDailyReportById(
     .maybeSingle();
 
   if (error || !report) {
-    if (error) {
-      console.error("[fetchDailyReportById] daily_reports error:", error);
-    }
+    if (error) console.error("[fetchDailyReportById] daily_reports error:", error);
     return null;
   }
 
@@ -235,14 +211,9 @@ export async function fetchDailyReportById(
     .is("deleted_at", null);
 
   const itemsRaw: any[] = report.items ?? [];
-  const materialIds = itemsRaw
-    .map((i) => i.material_id)
-    .filter(Boolean) as string[];
+  const materialIds = itemsRaw.map((i) => i.material_id).filter(Boolean) as string[];
 
-  const materialMap = new Map<
-    string,
-    { title: string; unit: string; currentQuantity: number }
-  >();
+  const materialMap = new Map<string, { title: string; unit: string; currentQuantity: number }>();
 
   if (materialIds.length > 0) {
     const { data: materials } = await supabase
@@ -261,11 +232,7 @@ export async function fetchDailyReportById(
 
   const items = itemsRaw.map((i: any) => {
     const meta =
-      materialMap.get(i.material_id) ?? {
-        title: "Nieznany materiał",
-        unit: "",
-        currentQuantity: 0,
-      };
+      materialMap.get(i.material_id) ?? { title: "Nieznany materiał", unit: "", currentQuantity: 0 };
 
     return {
       materialId: i.material_id as string,
@@ -284,6 +251,11 @@ export async function fetchDailyReportById(
     person: report.person as string,
     location: (report.location ?? null) as string | null,
     place: (report.place ?? null) as string | null,
+
+    // ✅ NOWE: lokalizacja magazynowa w detalu raportu
+    inventoryLocationId: (report.inventory_location_id ?? null) as string | null,
+    inventoryLocationLabel: ((report as any).inventory_locations?.label ?? null) as string | null,
+
     stageId: (report.stage_id ?? null) as string | null,
     taskId: (report.task_id ?? null) as string | null,
     taskName: (report.task_name ?? null) as string | null,
@@ -292,9 +264,7 @@ export async function fetchDailyReportById(
     photosCount: showPhotos ? (report.photos_count ?? 0) : 0,
     images: showPhotos ? ((report.images ?? []) as string[]) : [],
     items,
-    primaryCrewId:
-      crews?.find((c: any) => c.is_primary)?.crew_id ??
-      (report.crew_id ?? null),
+    primaryCrewId: crews?.find((c: any) => c.is_primary)?.crew_id ?? (report.crew_id ?? null),
     crews:
       crews?.map((c: any) => ({
         crewId: c.crew_id as string,

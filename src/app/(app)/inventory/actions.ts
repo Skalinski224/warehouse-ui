@@ -10,9 +10,7 @@ import type { PermissionSnapshot } from "@/lib/permissions";
 function assertUuid(v: unknown, name: string) {
   if (
     typeof v !== "string" ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-      v
-    )
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
   ) {
     throw new Error(`${name} must be a valid uuid`);
   }
@@ -66,7 +64,7 @@ async function assertInventoryAccess() {
 /**
  * Revalidate inventory routes.
  * - /inventory: lista draftów
- * - /inventory/new: kreator + edycja (query param session)
+ * - /inventory/new: edycja (query param session)
  * - /inventory/[id]/summary: podsumowanie
  */
 function revalidateInventory(sessionId?: string) {
@@ -79,14 +77,55 @@ function revalidateInventory(sessionId?: string) {
   }
 }
 
+async function getSessionLocationId(supabase: any, sessionId: string): Promise<string> {
+  const { data, error } = await supabase
+    .from("inventory_sessions")
+    .select("inventory_location_id")
+    .eq("id", sessionId)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw new Error(error.message ?? "Nie udało się pobrać sesji.");
+  const locId = (data as any)?.inventory_location_id as string | null;
+
+  if (!locId) throw new Error("Sesja nie ma przypisanej lokalizacji.");
+  return String(locId);
+}
+
+async function assertMaterialInLocation(supabase: any, materialId: string, locationId: string) {
+  const { data, error } = await supabase
+    .from("materials")
+    .select("id,inventory_location_id,deleted_at")
+    .eq("id", materialId)
+    .is("deleted_at", null)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw new Error(error.message ?? "Nie udało się pobrać materiału.");
+  if (!data) throw new Error("Nie można dodać usuniętego materiału.");
+
+  const matLoc = (data as any)?.inventory_location_id as string | null;
+  if (!matLoc || String(matLoc) !== String(locationId)) {
+    throw new Error("Ten materiał nie należy do wybranej lokalizacji sesji.");
+  }
+}
+
 /* ----------------------------- actions / rpc ----------------------------- */
 
-/** RPC: create_inventory_session(date, text) -> uuid */
+/**
+ * RPC: create_inventory_session(...)
+ * WYMAGANE: inventory_location_id (żeby sesja była „przywiązana” jak deliveries).
+ *
+ * Uwaga: zakładam, że RPC ma parametr:
+ * - p_inventory_location_id uuid
+ */
 export async function createInventorySession(params: {
   session_date?: string | null; // YYYY-MM-DD
   description?: string | null;
+  inventory_location_id: string; // uuid (required)
 }) {
   const supabase = await assertInventoryAccess();
+  assertUuid(params.inventory_location_id, "inventory_location_id");
 
   const session_date =
     params.session_date && params.session_date.trim() ? params.session_date.trim() : null;
@@ -97,6 +136,7 @@ export async function createInventorySession(params: {
   const { data, error } = await supabase.rpc("create_inventory_session", {
     p_session_date: session_date,
     p_description: description,
+    p_inventory_location_id: params.inventory_location_id,
   });
 
   if (error) {
@@ -112,37 +152,26 @@ export async function createInventorySession(params: {
 }
 
 /**
- * ✅ Dodaj wszystkie przedmioty z magazynu — TYLKO aktywne (nieusunięte).
- * Nie polegamy na RPC inventory_add_all_items (bo mogło dodać usunięte).
- * Lecimy po aktywnych materiałach i wołamy inventory_add_item(session, material).
+ * ✅ Dodaj wszystkie przedmioty z MAGAZYNU DLA LOKALIZACJI SESJI — tylko aktywne.
+ * Spójne z deliveries: pracujemy w obrębie jednej lokalizacji.
  */
 export async function inventoryAddAllItems(sessionId: string) {
   assertUuid(sessionId, "sessionId");
   const supabase = await assertInventoryAccess();
 
-  // bierzemy tylko aktywne materiały
+  const locationId = await getSessionLocationId(supabase, sessionId);
+
   const { data: mats, error: matsErr } = await supabase
-    .from("v_materials_active")
-    .select("id")
+    .from("materials")
+    .select("id,deleted_at,inventory_location_id")
+    .eq("inventory_location_id", locationId)
+    .is("deleted_at", null)
     .order("title", { ascending: true })
     .limit(5000);
 
   if (matsErr) {
-    // fallback: jeśli view nie istnieje (np. przed migracją)
-    console.warn("[inventoryAddAllItems] v_materials_active missing, fallback -> materials", matsErr);
-    const { data: mats2, error: mats2Err } = await supabase
-      .from("materials")
-      .select("id,deleted_at")
-      .is("deleted_at", null)
-      .order("title", { ascending: true })
-      .limit(5000);
-
-    if (mats2Err) {
-      logRpcError("[inventoryAddAllItems] materials query error", mats2Err);
-      throw new Error(mats2Err.message ?? "Failed to load active materials");
-    }
-
-    return await addAllByRpcLoop(supabase, sessionId, (mats2 ?? []).map((r: any) => String(r.id)));
+    logRpcError("[inventoryAddAllItems] materials query error", matsErr);
+    throw new Error(matsErr.message ?? "Failed to load active materials");
   }
 
   return await addAllByRpcLoop(supabase, sessionId, (mats ?? []).map((r: any) => String(r.id)));
@@ -156,17 +185,13 @@ async function addAllByRpcLoop(supabase: any, sessionId: string, materialIds: st
   for (let i = 0; i < materialIds.length; i += CHUNK) {
     const part = materialIds.slice(i, i + CHUNK);
 
-    // równolegle w małym chunku
     const results = await Promise.all(
       part.map(async (materialId) => {
         const { error } = await supabase.rpc("inventory_add_item", {
           p_session_id: sessionId,
           p_material_id: materialId,
         });
-        if (error) {
-          // nie przerywamy całości — często to duplikat/konflikt
-          return false;
-        }
+        if (error) return false; // duplikat/konflikt — nie przerywamy
         return true;
       })
     );
@@ -184,28 +209,8 @@ export async function inventoryAddItem(sessionId: string, materialId: string) {
   assertUuid(materialId, "materialId");
   const supabase = await assertInventoryAccess();
 
-  // safety: nie pozwól dodać usuniętego (sprawdzamy w v_materials_active)
-  const { data: okRow, error: okErr } = await supabase
-    .from("v_materials_active")
-    .select("id")
-    .eq("id", materialId)
-    .limit(1)
-    .maybeSingle();
-
-  if (okErr) {
-    // jeśli view jeszcze nie ma — fallback
-    const { data: okRow2, error: okErr2 } = await supabase
-      .from("materials")
-      .select("id,deleted_at")
-      .eq("id", materialId)
-      .is("deleted_at", null)
-      .limit(1)
-      .maybeSingle();
-
-    if (okErr2 || !okRow2) throw new Error("Nie można dodać usuniętego materiału.");
-  } else if (!okRow) {
-    throw new Error("Nie można dodać usuniętego materiału.");
-  }
+  const locationId = await getSessionLocationId(supabase, sessionId);
+  await assertMaterialInLocation(supabase, materialId, locationId);
 
   const { error } = await supabase.rpc("inventory_add_item", {
     p_session_id: sessionId,
@@ -310,56 +315,38 @@ export async function approveInventorySession(sessionId: string) {
 }
 
 /**
- * ✅ Server Action: wyszukiwarka materiałów dla InventoryEditor (client).
- * Tylko aktywne (nieusunięte) — przez v_materials_active.
+ * ✅ Server Action: wyszukiwarka materiałów dla InventoryEditorV2 (client).
+ * Filtrowanie po lokalizacji SESJI (jak deliveries).
  */
-export async function inventorySearchMaterials(q: string) {
+export async function inventorySearchMaterials(sessionId: string, q: string) {
+  assertUuid(sessionId, "sessionId");
   const supabase = await assertInventoryAccess();
 
+  const locationId = await getSessionLocationId(supabase, sessionId);
   const needle = (q ?? "").trim();
 
-  // Prefer: v_materials_active
   let query = supabase
-    .from("v_materials_active")
-    .select("id,title,unit")
+    .from("materials")
+    .select("id,title,unit,deleted_at,inventory_location_id")
+    .eq("inventory_location_id", locationId)
+    .is("deleted_at", null)
     .order("title", { ascending: true })
     .limit(20);
 
   if (needle) query = query.ilike("title", `%${needle}%`);
 
   const { data, error } = await query;
+
   if (error) {
-    // fallback: jeśli view nie istnieje
-    const fb = supabase
-      .from("materials")
-      .select("id,title,unit,deleted_at")
-      .is("deleted_at", null)
-      .order("title", { ascending: true })
-      .limit(20);
-
-    const fb2 = needle ? fb.ilike("title", `%${needle}%`) : fb;
-
-    const { data: data2, error: error2 } = await fb2;
-
-    if (error2) {
-      logRpcError("[inventorySearchMaterials] query error", error2);
-      throw new Error(error2.message ?? "Failed to search materials");
-    }
-
-    return {
-      rows: (data2 ?? []).map((m: any) => ({
-        id: m.id,
-        title: m.title,
-        unit: m.unit ?? null,
-      })),
-    };
+    logRpcError("[inventorySearchMaterials] query error", error);
+    throw new Error(error.message ?? "Failed to search materials");
   }
 
   return {
     rows: (data ?? []).map((m: any) => ({
-      id: m.id,
-      title: m.title,
-      unit: m.unit ?? null,
+      id: String(m.id),
+      title: String(m.title),
+      unit: (m.unit as string) ?? null,
     })),
   };
 }

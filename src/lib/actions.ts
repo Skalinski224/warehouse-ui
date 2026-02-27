@@ -17,6 +17,13 @@ function refresh(paths: string[]) {
   for (const p of paths) revalidatePath(p);
 }
 
+function uuid(): string {
+  const c: any = (globalThis as any).crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  // fallback (wystarczy jako client_key)
+  return `ck-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 /**
  * Supabase/PostgREST potrafi zwracać brak RPC jako:
  * - Postgres: 42883 "function does not exist"
@@ -59,8 +66,7 @@ async function requirePermission(perm: string) {
 
   // Format A
   const obj = Array.isArray(data) ? (data[0] ?? null) : data;
-  const permsA =
-    obj && typeof obj === "object" ? (obj as any).permissions : null;
+  const permsA = obj && typeof obj === "object" ? (obj as any).permissions : null;
 
   if (Array.isArray(permsA)) {
     if (!permsA.includes(perm)) {
@@ -145,6 +151,95 @@ export async function createMaterial(formData: FormData) {
   const description = String(formData.get("description") || "").trim();
   const ctaUrl = String(formData.get("cta_url") || "").trim() || null;
 
+  // 🔥 LOKACJA (ETAP 3) — select istniejącej albo utworzenie nowej
+  const rawSelectedLocationId = String(
+    formData.get("inventory_location_id") || ""
+  ).trim();
+  const selectedLocationId =
+    rawSelectedLocationId === "__NEW__" ? "" : rawSelectedLocationId;
+
+  const newLocationLabelRaw = String(
+    formData.get("inventory_location_new_label") || ""
+  ).trim();
+
+  let locationId: string | null = selectedLocationId || null;
+  let locationLabel: string | null = null;
+
+  // Jeśli user wpisał NOWĄ lokację — tworzymy / znajdujemy w DB
+  if (newLocationLabelRaw) {
+    const accountId = await getCurrentAccountIdOrThrow(supabase);
+
+    // 1) znajdź istniejącą (case-insensitive) w obrębie konta
+    const { data: existing, error: findErr } = await supabase
+      .from("inventory_locations")
+      .select("id,label")
+      .eq("account_id", accountId)
+      .is("deleted_at", null)
+      .ilike("label", newLocationLabelRaw)
+      .limit(1);
+
+    if (findErr) {
+      console.warn("createMaterial: find location error", findErr.message);
+    }
+
+    const row = (existing ?? [])[0] as any | undefined;
+
+    if (row?.id) {
+      locationId = String(row.id);
+      locationLabel = String(row.label ?? newLocationLabelRaw);
+    } else {
+      // 2) insert nowej lokacji
+      const { data: inserted, error: insErr } = await supabase
+        .from("inventory_locations")
+        .insert({
+          account_id: accountId,
+          label: newLocationLabelRaw,
+        })
+        .select("id,label")
+        .single();
+
+      if (insErr) {
+        // 23505: unique -> ktoś równolegle dodał; wtedy spróbuj jeszcze raz znaleźć
+        if (insErr.code === "23505") {
+          const { data: again } = await supabase
+            .from("inventory_locations")
+            .select("id,label")
+            .eq("account_id", accountId)
+            .is("deleted_at", null)
+            .ilike("label", newLocationLabelRaw)
+            .limit(1);
+
+          const row2 = (again ?? [])[0] as any | undefined;
+          if (row2?.id) {
+            locationId = String(row2.id);
+            locationLabel = String(row2.label ?? newLocationLabelRaw);
+          } else {
+            throw new Error("Nie udało się utworzyć lokacji (konflikt).");
+          }
+        } else {
+          throw new Error(insErr.message || "Nie udało się utworzyć lokacji.");
+        }
+      } else {
+        locationId = String((inserted as any).id);
+        locationLabel = String((inserted as any).label ?? newLocationLabelRaw);
+      }
+    }
+  }
+
+  // Jeśli wybrano istniejącą lokację z selecta, ustaw snapshot label z DB
+  if (locationId && !locationLabel) {
+    const { data: locRow, error: locErr } = await supabase
+      .from("inventory_locations")
+      .select("label")
+      .eq("id", locationId)
+      .limit(1)
+      .maybeSingle();
+
+    if (!locErr && locRow?.label) {
+      locationLabel = String(locRow.label);
+    }
+  }
+
   if (!title || !unit) throw new Error("Brak wymaganych pól (title, unit).");
 
   const { data: rpcData, error: e1 } = await supabase.rpc("create_material", {
@@ -156,6 +251,10 @@ export async function createMaterial(formData: FormData) {
     p_image_url: null,
     p_cta_url: ctaUrl,
     p_family_key: null,
+
+    // 🔥 LOKACJA (ETAP 3)
+    p_inventory_location_id: locationId || null,
+    p_inventory_location_label: locationLabel,
   });
 
   if (e1) {
@@ -184,7 +283,6 @@ export async function createMaterial(formData: FormData) {
   // Jeśli chcesz upload zdjęcia już przy tworzeniu:
   const file = (formData.get("image") as File | null) ?? null;
   if (file && file.size > 0) {
-    // tu możesz wymagać osobnego perm, ale create i tak zwykle mają tylko storeman/manager/owner
     const accountId = await getCurrentAccountIdOrThrow(supabase);
 
     // STAŁA ŚCIEŻKA -> zero śmieci
@@ -240,8 +338,37 @@ export async function createMaterial(formData: FormData) {
     }
   }
 
-  refresh(["/materials", "/low-stock"]);
+  refresh(["/materials", "/low-stock", "/summary"]);
   return materialId;
+}
+
+/**
+ * ✅ USTAWIENIE STANU (PVR source-of-truth) – zapis przez inventory_movements.
+ * Wymaga RPC: set_material_stock_qty(p_material_id, p_new_qty, p_note, p_client_key)
+ */
+export async function setMaterialStockQty(
+  materialId: string,
+  newQty: number,
+  note?: string | null
+): Promise<void> {
+  const supabase = await requirePermission(PERM.MATERIALS_WRITE);
+
+  const id = String(materialId || "").trim();
+  if (!id) return;
+
+  const qty = Number(newQty);
+  if (!Number.isFinite(qty)) throw new Error("Nieprawidłowa ilość.");
+
+  const { error } = await supabase.rpc("set_material_stock_qty", {
+    p_material_id: id,
+    p_new_qty: qty,
+    p_note: note ?? null,
+    p_client_key: uuid(),
+  } as any);
+
+  if (error) throw new Error(error.message || "Nie udało się ustawić stanu.");
+
+  refresh(["/materials", `/materials/${id}`, "/low-stock", "/summary"]);
 }
 
 export async function updateMaterial(id: string, patch: Record<string, any>) {
@@ -253,24 +380,29 @@ export async function updateMaterial(id: string, patch: Record<string, any>) {
     await requirePermission(getMaterialsImagePermission());
   }
 
+  // ✅ ważne: current_quantity WYCIĘTE, bo stan idzie przez movements (setMaterialStockQty)
   const allowed = new Set([
     "title",
     "description",
     "unit",
     "base_quantity",
-    "current_quantity",
     "cta_url",
     "image_url",
+
+    // (bezpieczne do przyszłego użycia; nie zmienia zachowania jeśli nie wysyłasz)
+    "inventory_location_id",
   ]);
 
   const clean: Record<string, any> = {};
   for (const [k, v] of Object.entries(patch || {})) {
     if (!allowed.has(k)) continue;
 
-    if (k === "base_quantity" || k === "current_quantity") {
+    if (k === "base_quantity") {
       clean[k] = Number(v);
     } else if (v === "" && ["description", "cta_url", "image_url"].includes(k)) {
       clean[k] = null;
+    } else if (k === "inventory_location_id") {
+      clean[k] = v ? String(v) : null;
     } else {
       clean[k] = v;
     }
@@ -286,7 +418,6 @@ export async function updateMaterial(id: string, patch: Record<string, any>) {
 
   if (rpcErr) {
     // 2) brak RPC / schema cache → fallback na direct update
-    // UWAGA: to wymaga żeby audit trigger działał poprawnie (SECURITY DEFINER w fn_materials_audit)
     if (isNoSuchFunction(rpcErr)) {
       const { error } = await supabase
         .from("materials")
@@ -300,7 +431,7 @@ export async function updateMaterial(id: string, patch: Record<string, any>) {
     }
   }
 
-  refresh(["/materials", `/materials/${id}`, "/low-stock"]);
+  refresh(["/materials", `/materials/${id}`, "/low-stock", "/summary"]);
 }
 
 /**
@@ -351,7 +482,7 @@ export async function uploadMaterialImage(formData: FormData): Promise<void> {
   // Ustawiamy image_url przez updateMaterial (zachowa logikę RPC/fallback + revalidate)
   await updateMaterial(materialId, { image_url: imageUrl });
 
-  refresh(["/materials", `/materials/${materialId}`, "/low-stock"]);
+  refresh(["/materials", `/materials/${materialId}`, "/low-stock", "/summary"]);
 }
 
 export async function softDeleteMaterial(id: string) {
@@ -375,7 +506,7 @@ export async function softDeleteMaterial(id: string) {
     }
   }
 
-  refresh(["/materials", `/materials/${id}`, "/low-stock"]);
+  refresh(["/materials", `/materials/${id}`, "/low-stock", "/summary"]);
 }
 
 export async function restoreMaterial(id: string) {
@@ -399,7 +530,7 @@ export async function restoreMaterial(id: string) {
     }
   }
 
-  refresh(["/materials", `/materials/${id}`, "/low-stock"]);
+  refresh(["/materials", `/materials/${id}`, "/low-stock", "/summary"]);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -471,8 +602,7 @@ export async function createDelivery(formData: FormData): Promise<string> {
 
   if (error) throw new Error(error.message || "Nie udało się utworzyć dostawy.");
 
-  const deliveryId: string =
-    typeof data === "string" ? data : (data as any)?.id;
+  const deliveryId: string = typeof data === "string" ? data : (data as any)?.id;
   if (!deliveryId) throw new Error("create_delivery: brak ID w odpowiedzi");
 
   refresh([
@@ -480,6 +610,7 @@ export async function createDelivery(formData: FormData): Promise<string> {
     "/reports/deliveries",
     "/low-stock",
     "/materials",
+    "/summary",
     "/reports/project-metrics",
     "/reports/plan-vs-reality",
   ]);
@@ -499,7 +630,7 @@ export async function softDeleteDelivery(id: string) {
 
   if (error) throw new Error(error.message);
 
-  refresh(["/reports/deliveries", "/deliveries"]);
+  refresh(["/reports/deliveries", "/deliveries", "/summary"]);
 }
 
 export async function restoreDelivery(id: string) {
@@ -514,7 +645,7 @@ export async function restoreDelivery(id: string) {
 
   if (error) throw new Error(error.message);
 
-  refresh(["/reports/deliveries", "/deliveries"]);
+  refresh(["/reports/deliveries", "/deliveries", "/summary"]);
 }
 
 export async function markDeliveryPaid(formData: FormData): Promise<void> {
@@ -533,6 +664,8 @@ export async function markDeliveryPaid(formData: FormData): Promise<void> {
     "/reports/deliveries",
     "/low-stock",
     "/deliveries",
+    "/materials",
+    "/summary",
     "/reports/project-metrics",
     "/reports/plan-vs-reality",
   ]);
@@ -555,6 +688,7 @@ export async function approveDelivery(formData: FormData): Promise<void> {
     "/reports/deliveries",
     "/low-stock",
     "/materials",
+    "/summary",
     "/reports/project-metrics",
     "/reports/plan-vs-reality",
   ]);
@@ -574,14 +708,18 @@ export async function approveDailyReport(formData: FormData): Promise<void> {
   if (error) throw new Error(error.message || "Nie udało się zatwierdzić raportu.");
 
   // 2) NOWE: jeśli raport ma task_id + is_completed=true -> ustaw task done (SECURITY DEFINER)
-  const { error: taskErr } = await supabase.rpc("complete_task_from_daily_report", {
-    p_report_id: id,
-  });
+  const { error: taskErr } = await supabase.rpc(
+    "complete_task_from_daily_report",
+    {
+      p_report_id: id,
+    }
+  );
 
   if (taskErr) {
-    // nie wywracaj całego approve jeśli nie ma RPC (dev) albo cache, ale loguj
     if (!isNoSuchFunction(taskErr)) {
-      throw new Error(taskErr.message || "Nie udało się zaktualizować statusu zadania.");
+      throw new Error(
+        taskErr.message || "Nie udało się zaktualizować statusu zadania."
+      );
     }
   }
 
@@ -589,13 +727,13 @@ export async function approveDailyReport(formData: FormData): Promise<void> {
     "/reports/daily",
     "/low-stock",
     "/materials",
+    "/summary",
     "/reports/project-metrics",
     "/reports/plan-vs-reality",
     "/tasks",
     "/object",
   ]);
 }
-
 
 /* -------------------------------------------------------------------------- */
 /*                 DZIENNE RAPORTY – CREATE Z ZADANIAMI (OBIEKT)              */
@@ -658,14 +796,15 @@ export async function createDailyReportWithTasks(
     .select("id")
     .single();
 
-  if (reportErr) throw new Error(reportErr.message || "Nie udało się zapisać raportu.");
+  if (reportErr)
+    throw new Error(reportErr.message || "Nie udało się zapisać raportu.");
 
   const reportId: string = (reportRow as any).id;
   if (!reportId) throw new Error("Brak id raportu.");
 
   const completedTasks = input.completedTasks ?? [];
   if (completedTasks.length === 0) {
-    refresh(["/reports/daily"]);
+    refresh(["/reports/daily", "/summary"]);
     return reportId;
   }
 
@@ -684,7 +823,10 @@ export async function createDailyReportWithTasks(
       .select("id")
       .single();
 
-    if (compErr) throw new Error(compErr.message || "Nie udało się zapisać zakończenia zadania.");
+    if (compErr)
+      throw new Error(
+        compErr.message || "Nie udało się zapisać zakończenia zadania."
+      );
 
     const completionId: string = (completionRow as any).id;
 
@@ -705,6 +847,6 @@ export async function createDailyReportWithTasks(
       .neq("status", "done");
   }
 
-  refresh(["/reports/daily", "/tasks", "/object"]);
+  refresh(["/reports/daily", "/tasks", "/object", "/summary"]);
   return reportId;
 }

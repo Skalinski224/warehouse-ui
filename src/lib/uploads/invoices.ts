@@ -52,10 +52,7 @@ async function getCurrentAccountId(sb: SbClient): Promise<string | null> {
   if (typeof data === "string") return data;
 
   if (data && typeof data === "object") {
-    const maybe =
-      (data as any).current_account_id ??
-      (data as any).account_id ??
-      null;
+    const maybe = (data as any).current_account_id ?? (data as any).account_id ?? null;
     return typeof maybe === "string" ? maybe : null;
   }
 
@@ -70,10 +67,7 @@ async function guardAccountAndPerm(
   | { ok: true; snap: PermissionSnapshot; currentAccountId: string }
   | { ok: false; error: string }
 > {
-  const [snap, currentAccountId] = await Promise.all([
-    getSnapshot(sb),
-    getCurrentAccountId(sb),
-  ]);
+  const [snap, currentAccountId] = await Promise.all([getSnapshot(sb), getCurrentAccountId(sb)]);
 
   if (!snap || !currentAccountId) {
     return { ok: false, error: "Brak autoryzacji" };
@@ -94,6 +88,22 @@ function safeContentType(file: File): string {
   const t = (file.type || "").toLowerCase().trim();
   // Twardy fallback; nie blokujemy uploadu tylko dlatego, że browser nie podał typu.
   return t || "application/octet-stream";
+}
+
+function safeFileName(file: File): string {
+  const raw = String(file?.name || "invoice");
+  const base = raw.split(/[/\\]/).pop() || "invoice";
+  const cleaned = base.replace(/[^\w.\-() ]+/g, "_").trim();
+  if (!cleaned || cleaned === "." || cleaned === ".." || cleaned.includes("..")) return "invoice";
+  return cleaned;
+}
+
+function isSafeStoragePath(path: string): boolean {
+  const p = (path || "").trim();
+  if (!p) return false;
+  if (p.startsWith("/")) return false;
+  if (p.includes("..")) return false;
+  return true;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -131,14 +141,17 @@ export async function uploadInvoiceFile(
     return { path: null, publicUrl: null, error: guard.error };
   }
 
-  const path = buildInvoicePath(accountId, deliveryId, file.name);
+  const path = buildInvoicePath(accountId, deliveryId, safeFileName(file));
 
-  const { error: uploadError } = await sb.storage
-    .from(INVOICES_BUCKET)
-    .upload(path, file, {
-      upsert: true,
-      contentType: safeContentType(file),
-    });
+  // ✅ multi-tenant + path traversal hardening
+  if (!isSafeStoragePath(path) || !path.startsWith(`${accountId}/`)) {
+    return { path: null, publicUrl: null, error: "Nieprawidłowa ścieżka uploadu" };
+  }
+
+  const { error: uploadError } = await sb.storage.from(INVOICES_BUCKET).upload(path, file, {
+    upsert: true, // zachowuję Twoje zachowanie; zabezpieczenia są w guardzie + prefixie
+    contentType: safeContentType(file),
+  });
 
   if (uploadError) {
     console.warn("uploadInvoiceFile error:", uploadError.message);
@@ -165,11 +178,10 @@ export async function uploadInvoiceFile(
  *
  * UWAGA: SERVER-ONLY. Wywołuj przez Server Action / Route Handler.
  */
-export async function getInvoiceSignedUrl(
-  params: GetSignedUrlParams
-): Promise<string | null> {
+export async function getInvoiceSignedUrl(params: GetSignedUrlParams): Promise<string | null> {
   const { path, expiresIn = 3600 } = params;
   if (!path) return null;
+  if (!isSafeStoragePath(path)) return null;
 
   const sb = await supabaseServer();
   const snap = await getSnapshot(sb);
@@ -186,9 +198,7 @@ export async function getInvoiceSignedUrl(
   // multi-tenant: ścieżka musi należeć do aktualnego konta
   if (!path.startsWith(`${currentAccountId}/`)) return null;
 
-  const { data, error } = await sb.storage
-    .from(INVOICES_BUCKET)
-    .createSignedUrl(path, expiresIn);
+  const { data, error } = await sb.storage.from(INVOICES_BUCKET).createSignedUrl(path, expiresIn);
 
   if (error) {
     console.warn("getInvoiceSignedUrl error:", error.message);
@@ -203,20 +213,16 @@ export async function getInvoiceSignedUrl(
  *
  * UWAGA: SERVER-ONLY. Wywołuj przez Server Action / Route Handler.
  */
-export async function deleteInvoiceFile(
-  path: string | null | undefined
-): Promise<void> {
+export async function deleteInvoiceFile(path: string | null | undefined): Promise<void> {
   if (!path) return;
+  if (!isSafeStoragePath(path)) return;
 
   const sb = await supabaseServer();
   const snap = await getSnapshot(sb);
   if (!snap) return;
 
   if (
-    !canAny(snap, [
-      PERM.DELIVERIES_UPDATE_UNAPPROVED,
-      PERM.DELIVERIES_DELETE_UNAPPROVED,
-    ])
+    !canAny(snap, [PERM.DELIVERIES_UPDATE_UNAPPROVED, PERM.DELIVERIES_DELETE_UNAPPROVED])
   ) {
     return;
   }

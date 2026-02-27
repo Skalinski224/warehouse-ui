@@ -13,7 +13,11 @@ import { can, canAny, PERM, type PermissionSnapshot } from "@/lib/permissions";
 export type NewDailyReportPayload = {
   date: string; // YYYY-MM-DD
   person: string;
-  location: string | null; // UI: ignorujemy w DB
+
+  // ✅ NOWE (KANON): lokacja magazynowa (required)
+  inventoryLocationId: string;
+
+  location: string | null; // UI: ignorujemy w DB (legacy)
   place: string | null;
   stageId: string | null;
 
@@ -45,6 +49,10 @@ const ItemSchema = z.object({
 const NewDailyReportSchema = z.object({
   date: z.string().min(1),
   person: z.string().min(1),
+
+  // ✅ NOWE
+  inventoryLocationId: z.string().uuid(),
+
   location: z.string().nullable(),
   place: z.string().nullable(),
   stageId: z.string().uuid().nullable(),
@@ -224,6 +232,10 @@ function normalizePayload(p: NewDailyReportPayload): NewDailyReportPayload {
   return {
     ...p,
     person,
+
+    // ✅ twardo
+    inventoryLocationId: String(p.inventoryLocationId || "").trim(),
+
     place: p.place && String(p.place).trim().length > 0 ? String(p.place).trim() : null,
     location: null, // DB nie potrzebuje
     taskName: null, // zawsze z DB (o ile taskId istnieje)
@@ -262,7 +274,6 @@ function getClientKeyFromFormData(formData: FormData): string {
   const key = ck || dk;
   if (!key) throw new Error("Brak client_key (idempotency).");
 
-  // prosty sanity
   if (key.length < 8) throw new Error("client_key za krótki.");
   if (key.length > 120) throw new Error("client_key za długi.");
 
@@ -296,15 +307,7 @@ async function findExistingByClientKey(params: {
 /* -------------------------------------------------------------------------- */
 /*                           Server action: createDailyReport                  */
 /* -------------------------------------------------------------------------- */
-/**
- * ZAPIS Z PODSUMOWANIA = tylko tworzy PENDING:
- *  - approved=false
- *  - submitted_at=now() (żeby wpadało do kolejki)
- *  - NIE zmienia magazynu
- *  - NIE zmienia taska
- *  - pozwala na wiele raportów tego samego dnia / dla tego samego taska
- *    -> blokuje tylko duplikat (ten sam client_key)
- */
+
 export async function createDailyReport(formData: FormData) {
   const json = formData.get("payload");
   if (!json || typeof json !== "string") throw new Error("Invalid payload");
@@ -324,6 +327,11 @@ export async function createDailyReport(formData: FormData) {
   }
 
   let payload = normalizePayload(parsed.data as NewDailyReportPayload);
+
+  // ✅ twardo: lokacja musi istnieć
+  if (!payload.inventoryLocationId) {
+    throw new Error("Wybierz lokalizację magazynową.");
+  }
 
   const supabase = await supabaseServer();
   const snapshot = await getPermSnapshot(supabase);
@@ -389,6 +397,7 @@ export async function createDailyReport(formData: FormData) {
       .select("name")
       .eq("id", crewIdToSave)
       .maybeSingle();
+
     crewNameToSave = String((mainCrew as any)?.name ?? "").trim();
   }
 
@@ -460,15 +469,15 @@ export async function createDailyReport(formData: FormData) {
     const placeId = (task as any).place_id as string | null;
 
     if (placeId) {
-      const { data: place } = await supabase.from("project_places").select("name").eq("id", placeId).maybeSingle();
+      const { data: place } = await supabase
+        .from("project_places")
+        .select("name")
+        .eq("id", placeId)
+        .maybeSingle();
       if ((place as any)?.name) placeName = String((place as any).name);
     }
 
-    payload = {
-      ...payload,
-      taskName: taskTitle,
-      place: placeName ?? null,
-    };
+    payload = { ...payload, taskName: taskTitle, place: placeName ?? null };
   } else {
     payload = { ...payload, taskName: null };
   }
@@ -484,6 +493,9 @@ export async function createDailyReport(formData: FormData) {
     place: payload.place,
     stage_id: payload.stageId,
 
+    // ✅ NOWE: zapis lokacji
+    inventory_location_id: payload.inventoryLocationId,
+
     crew_id: crewIdToSave,
     crew_name: crewNameToSave,
 
@@ -494,7 +506,6 @@ export async function createDailyReport(formData: FormData) {
     task_id: payload.taskId,
     task_name: payload.taskName,
 
-    // checkbox z formularza – ma sens dopiero przy approve
     is_completed: payload.isCompleted,
 
     images: payload.images.length > 0 ? payload.images : null,
@@ -514,14 +525,8 @@ export async function createDailyReport(formData: FormData) {
   if (insertError || !report?.id) {
     console.error("[createDailyReport] insert daily_reports error:", insertError);
 
-    // idempotency: jeśli client_key już istnieje -> zwróć istniejący rekord
     if (isDuplicateKeyError(insertError)) {
-      const existing = await findExistingByClientKey({
-        supabase,
-        accountId,
-        clientKey,
-      });
-
+      const existing = await findExistingByClientKey({ supabase, accountId, clientKey });
       if (existing) return { id: existing.id, approved: existing.approved };
     }
 
@@ -546,6 +551,8 @@ export async function createDailyReport(formData: FormData) {
 
   return { id: reportId, approved: false };
 }
+
+
 
 /* -------------------------------------------------------------------------- */
 /*                   Server action: approveDailyReport (manual)                */

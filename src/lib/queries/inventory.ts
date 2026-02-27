@@ -6,6 +6,7 @@ import { safeQuery } from "@/lib/safeQuery";
 import { PERM, canAny } from "@/lib/permissions";
 
 export type InventorySessionsQuery = {
+  gate?: "inventory" | "reports"; // domyślnie inventory
   from?: string | null; // YYYY-MM-DD
   to?: string | null; // YYYY-MM-DD
   q?: string | null; // search in person/description
@@ -20,18 +21,24 @@ export type InventorySessionRow = {
   account_id: string;
   session_date: string;
   created_at: string;
-  created_by: string;
 
-  first_name: string | null;
-  last_name: string | null;
+  // ⚠️ te pola mogą być null, bo view może ich nie mieć (fallback)
+  created_by: string | null;
+
   person: string | null;
 
   description: string | null;
   approved: boolean;
+
   approved_at: string | null;
   approved_by: string | null;
 
   deleted_at: string | null;
+
+  inventory_location_id: string | null;
+  inventory_location_label: string | null;
+
+  items_count: number | null;
 };
 
 export type InventorySessionDetailRow = {
@@ -68,10 +75,15 @@ export type InventorySessionMeta = {
   created_at: string;
   created_by: string;
   description: string | null;
+
   approved: boolean;
   approved_at: string | null;
   approved_by: string | null;
+
   deleted_at: string | null;
+
+  inventory_location_id: string | null;
+  inventory_location_label: string | null;
 };
 
 export type InventorySessionDetailsResult = {
@@ -85,72 +97,196 @@ function toRange(limit = 50, offset = 0) {
   return { from: o, to: o + l - 1 };
 }
 
+async function canReadInventoryModule(): Promise<boolean> {
+  const supabase = await supabaseServer();
+
+  const { data, error } = await supabase.rpc("my_permissions_snapshot");
+  if (error) return false;
+
+  const snapshot: any = Array.isArray(data) ? data[0] : data;
+  if (!snapshot) return false;
+
+  const role = (snapshot?.role ?? null) as string | null;
+  if (role === "worker" || role === "foreman") return false;
+
+  // legacy fallback (na czas przejścia)
+  const roleOk = role === "owner" || role === "manager" || role === "storeman";
+  if (roleOk) return true;
+
+  return canAny(snapshot, [PERM.INVENTORY_READ, PERM.INVENTORY_MANAGE]);
+}
+
 async function canReadInventoryReports(): Promise<boolean> {
   const supabase = await supabaseServer();
 
   const { data, error } = await supabase.rpc("my_permissions_snapshot");
   if (error) return false;
 
-  const snapshot = Array.isArray(data) ? data[0] : data;
+  const snapshot: any = Array.isArray(data) ? data[0] : data;
   if (!snapshot) return false;
 
-  // Raporty inwentaryzacji albo “magazyn/inwentaryzacja” (jak ktoś ma tylko to)
-  return canAny(snapshot, [PERM.REPORTS_INVENTORY_READ, PERM.INVENTORY_READ]);
+  const role = (snapshot?.role ?? null) as string | null;
+  if (role === "worker" || role === "foreman") return false;
+
+  return canAny(snapshot, [PERM.REPORTS_INVENTORY_READ]);
 }
 
-/**
- * List inventory sessions from view: v_inventory_sessions_overview
- */
-export async function getInventorySessions(params: InventorySessionsQuery = {}) {
-  // Permission gate
-  const allowed = await canReadInventoryReports();
-  if (!allowed) return { rows: [] as InventorySessionRow[], count: 0 };
-
-  const supabase = await supabaseServer();
-
+function applySessionFilters(
+  qb: any,
+  params: InventorySessionsQuery,
+  opts?: { has_deleted_at?: boolean }
+) {
   const {
     from = null,
     to = null,
     q = null,
     approved = null,
     include_deleted = false,
-    limit = 50,
-    offset = 0,
   } = params;
 
-  const range = toRange(limit, offset);
-
-  let query = supabase
-    .from("v_inventory_sessions_overview")
-    .select(
-      "id,account_id,session_date,created_at,created_by,first_name,last_name,person,description,approved,approved_at,approved_by,deleted_at",
-      { count: "exact" }
-    )
-    .order("created_at", { ascending: false })
-    .range(range.from, range.to);
-
-  if (from) query = query.gte("session_date", from);
-  if (to) query = query.lte("session_date", to);
+  if (from) qb = qb.gte("session_date", from);
+  if (to) qb = qb.lte("session_date", to);
 
   if (approved !== null && approved !== undefined) {
-    query = query.eq("approved", approved);
+    qb = qb.eq("approved", approved);
   }
 
-  // ✅ najważniejsze: domyślnie ukrywamy usunięte
-  if (!include_deleted) {
-    query = query.is("deleted_at", null);
+  // ⚠️ deleted_at może nie istnieć w view -> filtrujemy tylko jeśli jest
+  if (opts?.has_deleted_at && !include_deleted) {
+    qb = qb.is("deleted_at", null);
   }
 
   if (q && q.trim()) {
     const needle = `%${q.trim()}%`;
-    query = query.or(`person.ilike.${needle},description.ilike.${needle}`);
+    qb = qb.or(`person.ilike.${needle},description.ilike.${needle}`);
   }
 
-  const res = await safeQuery(query);
-  return {
-    rows: (res.data ?? []) as InventorySessionRow[],
-    count: res.count ?? null,
-  };
+  return qb;
+}
+
+/**
+ * List inventory sessions from view: v_inventory_sessions_overview
+ * - fallbackuje na minimalny select, jeśli view nie ma meta-kolumn (created_by, deleted_at, approved_at...)
+ * - zwraca error do UI, żebyś nie miał "pustej listy" bez przyczyny
+ */
+export async function getInventorySessions(params: InventorySessionsQuery = {}) {
+  const gate = params.gate ?? "inventory";
+  const allowed =
+    gate === "reports"
+      ? await canReadInventoryReports()
+      : await canReadInventoryModule();
+
+  if (!allowed) {
+    return { rows: [] as InventorySessionRow[], count: 0, error: null as string | null };
+  }
+
+  const supabase = await supabaseServer();
+  const { limit = 50, offset = 0 } = params;
+  const range = toRange(limit, offset);
+
+  // 1) Prefer: pełny zestaw (jeśli view jest “bogate”)
+  let q1: any = supabase.from("v_inventory_sessions_overview").select(
+    [
+      "id,account_id,session_date,created_at,created_by",
+      "description,approved,approved_at,approved_by,deleted_at",
+      "inventory_location_id,inventory_location_label",
+      "person",
+      "items_count",
+    ].join(","),
+    { count: "exact" }
+  );
+
+  q1 = applySessionFilters(q1, params, { has_deleted_at: true })
+    .order("created_at", { ascending: false })
+    .range(range.from, range.to);
+
+  const res1: any = await safeQuery(q1);
+  if (!res1?.error) {
+    return {
+      rows: (res1.data ?? []) as InventorySessionRow[],
+      count: res1.count ?? null,
+      error: null as string | null,
+    };
+  }
+
+  // 2) Fallback: bez lokacji/meta (stare/uboższe view) — nadal zakłada deleted_at
+  let q2: any = supabase.from("v_inventory_sessions_overview").select(
+    [
+      "id,account_id,session_date,created_at,created_by",
+      "description,approved,approved_at,approved_by,deleted_at",
+      "person",
+      "items_count",
+    ].join(","),
+    { count: "exact" }
+  );
+
+  q2 = applySessionFilters(q2, params, { has_deleted_at: true })
+    .order("created_at", { ascending: false })
+    .range(range.from, range.to);
+
+  const res2: any = await safeQuery(q2);
+  if (!res2?.error) {
+    return {
+      rows: ((res2.data ?? []) as any[]).map((r) => ({
+        ...r,
+        inventory_location_id: (r as any).inventory_location_id ?? null,
+        inventory_location_label: (r as any).inventory_location_label ?? null,
+        items_count: (r as any).items_count ?? null,
+      })) as InventorySessionRow[],
+      count: res2.count ?? null,
+      error: null as string | null,
+    };
+  }
+
+  // 3) HARD FALLBACK: minimalny zestaw dokładnie jak Twoje view (#4)
+  let q3: any = supabase.from("v_inventory_sessions_overview").select(
+    [
+      "id,account_id,session_date,description,approved,created_at",
+      "inventory_location_id,inventory_location_label",
+      "person",
+      "items_count",
+    ].join(","),
+    { count: "exact" }
+  );
+
+  // ⚠️ tu NIE dotykamy deleted_at, bo kolumny nie ma
+  q3 = applySessionFilters(q3, params, { has_deleted_at: false })
+    .order("created_at", { ascending: false })
+    .range(range.from, range.to);
+
+  const res3: any = await safeQuery(q3);
+  if (!res3?.error) {
+    const mapped = ((res3.data ?? []) as any[]).map((r) => ({
+      id: String(r.id),
+      account_id: String(r.account_id),
+      session_date: String(r.session_date),
+      created_at: String(r.created_at),
+
+      created_by: null, // brak w view
+      approved_at: null, // brak w view
+      approved_by: null, // brak w view
+      deleted_at: null, // brak w view
+
+      description: (r.description ?? null) as string | null,
+      approved: Boolean(r.approved),
+
+      inventory_location_id: (r.inventory_location_id ?? null) as string | null,
+      inventory_location_label: (r.inventory_location_label ?? null) as string | null,
+
+      person: (r.person ?? null) as string | null,
+      items_count: (r.items_count ?? null) as number | null,
+    })) as InventorySessionRow[];
+
+    return {
+      rows: mapped,
+      count: res3.count ?? null,
+      error: null as string | null,
+    };
+  }
+
+  // jeśli wszystkie 3 padły -> zwracamy błąd do UI
+  const msg = String(res1?.error?.message ?? res2?.error?.message ?? res3?.error?.message ?? "Unknown error");
+  return { rows: [] as InventorySessionRow[], count: 0, error: msg };
 }
 
 /**
@@ -158,19 +294,29 @@ export async function getInventorySessions(params: InventorySessionsQuery = {}) 
  * - meta ALWAYS fetched from inventory_sessions (so it works even if session has 0 items)
  * - items fetched from v_inventory_session_details
  */
-export async function getInventorySessionDetails(sessionId: string) {
-  // Permission gate
-  const allowed = await canReadInventoryReports();
-  if (!allowed) return { meta: null, items: [] as InventorySessionDetailRow[] } satisfies InventorySessionDetailsResult;
+export async function getInventorySessionDetails(
+  sessionId: string,
+  opts?: { gate?: "inventory" | "reports" }
+) {
+  const gate = opts?.gate ?? "inventory";
+  const allowed =
+    gate === "reports"
+      ? await canReadInventoryReports()
+      : await canReadInventoryModule();
+
+  if (!allowed)
+    return {
+      meta: null,
+      items: [] as InventorySessionDetailRow[],
+    } satisfies InventorySessionDetailsResult;
 
   const supabase = await supabaseServer();
 
-  // 1) META (source of truth)
-  const metaRes = await safeQuery(
+  const metaRes: any = await safeQuery(
     supabase
       .from("inventory_sessions")
       .select(
-        "id,account_id,session_date,created_at,created_by,description,approved,approved_at,approved_by,deleted_at"
+        "id,account_id,session_date,created_at,created_by,description,approved,approved_at,approved_by,deleted_at,inventory_location_id"
       )
       .eq("id", sessionId)
       .limit(1)
@@ -189,8 +335,25 @@ export async function getInventorySessionDetails(sessionId: string) {
         approved_at: string | null;
         approved_by: string | null;
         deleted_at: string | null;
+        inventory_location_id: string | null;
       }
     | null;
+
+  let inventory_location_label: string | null = null;
+  if (metaRow?.inventory_location_id) {
+    const locRes: any = await safeQuery(
+      supabase
+        .from("inventory_locations")
+        .select("label,deleted_at")
+        .eq("id", metaRow.inventory_location_id)
+        .is("deleted_at", null)
+        .limit(1)
+        .maybeSingle()
+    );
+    inventory_location_label = (locRes.data as any)?.label
+      ? String((locRes.data as any).label)
+      : null;
+  }
 
   const meta: InventorySessionMeta | null = metaRow
     ? {
@@ -204,11 +367,12 @@ export async function getInventorySessionDetails(sessionId: string) {
         approved_at: metaRow.approved_at,
         approved_by: metaRow.approved_by,
         deleted_at: metaRow.deleted_at,
+        inventory_location_id: metaRow.inventory_location_id,
+        inventory_location_label,
       }
     : null;
 
-  // 2) ITEMS
-  const itemsRes = await safeQuery(
+  const itemsRes: any = await safeQuery(
     supabase
       .from("v_inventory_session_details")
       .select(

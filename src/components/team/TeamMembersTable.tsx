@@ -2,8 +2,8 @@
 "use client";
 
 import * as React from "react";
-import { useEffect, useMemo, useRef, useState, useTransition } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { supabaseClient } from "@/lib/supabaseClient";
 
 export type VTeamMember = {
@@ -44,6 +44,10 @@ type Props = {
   canEditDetails: boolean;
 };
 
+function cx(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
+
 function norm(s: string) {
   return (s || "").toLowerCase().trim();
 }
@@ -79,73 +83,117 @@ const SEL = {
   none: "__none__",
 } as const;
 
-/* ----------------------------- KANON: SECTION ----------------------------- */
+function pushToast(
+  router: ReturnType<typeof useRouter>,
+  pathname: string,
+  sp: URLSearchParams,
+  msg: string,
+  tone: "ok" | "err" = "ok"
+) {
+  const p = new URLSearchParams(sp.toString());
+  p.set("toast", encodeURIComponent(msg));
+  p.set("tone", tone);
+  router.replace(`${pathname}?${p.toString()}`);
+}
+
+/* ----------------------------- UI: SECTION ----------------------------- */
 
 function SectionHeader({
   title,
   count,
   hint,
+  right,
 }: {
   title: string;
   count: number;
   hint?: string;
+  right?: React.ReactNode;
 }) {
   return (
-    <div className="sticky top-0 z-[5] -mx-3 mb-3 border-y border-border bg-card/90 backdrop-blur px-3 py-2 sm:-mx-4 sm:px-4">
-      <div className="flex items-center justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <div className="text-xs font-semibold tracking-wide text-foreground">
-              {title}
-            </div>
-            <span className="rounded-full border border-border bg-background/40 px-2 py-0.5 text-[11px] text-foreground/80">
-              {count}
-            </span>
-          </div>
-          {hint ? (
-            <div className="mt-0.5 text-[11px] text-muted-foreground">
-              {hint}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="hidden sm:flex items-center gap-2">
-          <span className="h-[1px] w-10 bg-border/70" />
-          <span className="text-[11px] text-muted-foreground">
-            sekcja
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          <div className="text-sm font-semibold leading-tight">{title}</div>
+          <span className="rounded-full border border-border bg-background/20 px-2 py-0.5 text-[11px] opacity-80">
+            {count}
           </span>
         </div>
+        {hint ? <div className="mt-1 text-xs opacity-70">{hint}</div> : null}
       </div>
+      {right ? <div className="shrink-0">{right}</div> : null}
     </div>
   );
 }
 
-function RoleSection({
+function MobileAccordion({
   title,
   count,
   hint,
+  defaultOpen,
   children,
-  emptyLabel = "Brak pozycji.",
 }: {
   title: string;
   count: number;
   hint?: string;
-  emptyLabel?: string;
+  defaultOpen?: boolean;
   children: React.ReactNode;
 }) {
   return (
-    <section className="rounded-2xl border border-border bg-card overflow-hidden">
-      <div className="p-3 sm:p-4">
-        <SectionHeader title={title} count={count} hint={hint} />
-        <div className="grid gap-3">
-          {count > 0 ? (
-            children
-          ) : (
-            <div className="rounded-2xl border border-dashed border-border/70 bg-background/20 p-4 text-xs text-muted-foreground">
-              {emptyLabel}
-            </div>
-          )}
+    <details className="md:hidden rounded-2xl border border-border bg-card overflow-hidden" open={!!defaultOpen}>
+      <summary className="list-none cursor-pointer select-none">
+        <div className="p-4">
+          <SectionHeader
+            title={title}
+            count={count}
+            hint={hint}
+            right={
+              <span className="text-xs opacity-70">
+                Rozwiń <span className="opacity-70">▾</span>
+              </span>
+            }
+          />
         </div>
+        <div className="h-px bg-border/70" />
+      </summary>
+
+      <div className="p-4 pt-3">
+        {count > 0 ? (
+          <div className="grid gap-3 grid-cols-1">{children}</div>
+        ) : (
+          <div className="rounded-2xl border border-dashed border-border/70 bg-background/20 p-4 text-xs opacity-70">
+            Brak osób w tej sekcji.
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
+function DesktopSection({
+  title,
+  count,
+  hint,
+  children,
+}: {
+  title: string;
+  count: number;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="hidden md:block rounded-2xl border border-border bg-card overflow-hidden">
+      <div className="p-4">
+        <SectionHeader title={title} count={count} hint={hint} />
+      </div>
+      <div className="h-px bg-border/70" />
+      <div className="p-4 pt-3">
+        {count > 0 ? (
+          <div className="grid gap-3 grid-cols-1 md:grid-cols-2">{children}</div>
+        ) : (
+          <div className="rounded-2xl border border-dashed border-border/70 bg-background/20 p-4 text-xs opacity-70">
+            Brak osób w tej sekcji.
+          </div>
+        )}
       </div>
     </section>
   );
@@ -164,16 +212,13 @@ export function TeamMembersTable({
   canEditDetails,
 }: Props) {
   const router = useRouter();
-  const [isPending, startTransition] = useTransition();
+  const pathname = usePathname();
+  const sp = useSearchParams();
 
-  // lokalny stan listy + realtime refresh
   const [rows, setRows] = useState<VTeamMember[]>(members);
-
-  // live search
   const [q, setQ] = useState("");
   const qn = norm(q);
 
-  // edit modal
   const [editing, setEditing] = useState<VTeamMember | null>(null);
   const [form, setForm] = useState({
     first_name: "",
@@ -182,18 +227,15 @@ export function TeamMembersTable({
     phone: "",
   });
 
-  // crews
   const [crews, setCrews] = useState<Crew[]>([]);
   const [crewsLoading, setCrewsLoading] = useState(false);
 
-  // debouncer dla realtime refresh
   const refreshTimer = useRef<any>(null);
 
   useEffect(() => {
     setRows(members);
   }, [members]);
 
-  // load crews tylko jeśli można zmieniać brygadę
   useEffect(() => {
     if (!canChangeCrew) return;
 
@@ -203,10 +245,7 @@ export function TeamMembersTable({
       setCrewsLoading(true);
       try {
         const sb = supabaseClient();
-        const { data, error } = await sb
-          .from("crews")
-          .select("id, name")
-          .order("name", { ascending: true });
+        const { data, error } = await sb.from("crews").select("id, name").order("name", { ascending: true });
         if (!cancelled && !error && data) setCrews(data as Crew[]);
       } finally {
         if (!cancelled) setCrewsLoading(false);
@@ -222,33 +261,22 @@ export function TeamMembersTable({
   async function refreshFromDb() {
     try {
       const sb = supabaseClient();
-      const { data, error } = await sb
-        .from("v_team_members_view")
-        .select("*")
-        .order("created_at", { ascending: true });
-
+      const { data, error } = await sb.from("v_team_members_view").select("*").order("created_at", { ascending: true });
       if (!error && data) setRows(data as VTeamMember[]);
     } catch {
-      // celowo cicho – realtime nie ma rozwalać UI
+      // celowo cicho
     }
   }
 
-  // realtime: każde zdarzenie na team_members -> refresh view
   useEffect(() => {
     const sb = supabaseClient();
 
     const ch = sb
       .channel("team_members_live")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "team_members" },
-        () => {
-          if (refreshTimer.current) clearTimeout(refreshTimer.current);
-          refreshTimer.current = setTimeout(() => {
-            refreshFromDb();
-          }, 250);
-        }
-      )
+      .on("postgres_changes", { event: "*", schema: "public", table: "team_members" }, () => {
+        if (refreshTimer.current) clearTimeout(refreshTimer.current);
+        refreshTimer.current = setTimeout(() => refreshFromDb(), 250);
+      })
       .subscribe();
 
     return () => {
@@ -260,7 +288,6 @@ export function TeamMembersTable({
 
   const filtered = useMemo(() => {
     if (!qn) return [...rows];
-
     return rows.filter((m) => {
       const hay = norm(
         [
@@ -277,21 +304,15 @@ export function TeamMembersTable({
     });
   }, [rows, qn]);
 
-  // sort stabilnie po created_at
   const sorted = useMemo(() => {
-    return [...filtered].sort((a, b) =>
-      (a.created_at ?? "").localeCompare(b.created_at ?? "")
-    );
+    return [...filtered].sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? ""));
   }, [filtered]);
 
   const owners = useMemo(() => sorted.filter((m) => m.account_role === "owner"), [sorted]);
   const managers = useMemo(() => sorted.filter((m) => m.account_role === "manager"), [sorted]);
   const foremen = useMemo(() => sorted.filter((m) => m.account_role === "foreman"), [sorted]);
   const storemen = useMemo(() => sorted.filter((m) => m.account_role === "storeman"), [sorted]);
-  const workers = useMemo(
-    () => sorted.filter((m) => !m.account_role || m.account_role === "worker"),
-    [sorted]
-  );
+  const workers = useMemo(() => sorted.filter((m) => !m.account_role || m.account_role === "worker"), [sorted]);
 
   function openEditDialog(member: VTeamMember) {
     if (!canEditDetails || !onEdit) return;
@@ -313,73 +334,86 @@ export function TeamMembersTable({
     router.push(`/team/${id}`);
   }
 
-  function handleChangeCrew(member: VTeamMember, crewId: string | null) {
+  async function handleChangeCrew(member: VTeamMember, crewId: string | null) {
     if (!canChangeCrew || !onEdit) return;
 
-    startTransition(async () => {
+    try {
       await onEdit({ id: member.id, crew_id: crewId });
+      pushToast(router, pathname, new URLSearchParams(sp.toString()), "Zmieniono brygadę.", "ok");
       await refreshFromDb();
-    });
+    } catch (e: any) {
+      console.error("[TeamMembersTable] change crew error:", e);
+      pushToast(router, pathname, new URLSearchParams(sp.toString()), e?.message || "Nie udało się zmienić brygady.", "err");
+    }
   }
 
-  function handleChangeRole(member: VTeamMember, role: VTeamMember["account_role"]) {
+  async function handleChangeRole(member: VTeamMember, role: VTeamMember["account_role"]) {
     if (!canChangeRole) return;
     if (!role) return;
 
-    startTransition(async () => {
-      try {
-        const res = await fetch("/api/team/member/role", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ member_id: member.id, role }),
-        });
+    try {
+      const res = await fetch("/api/team/member/role", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ member_id: member.id, role }),
+      });
 
-        const json = await res.json().catch(() => ({}));
-
-        if (!res.ok || !json.ok) {
-          console.error("[set_member_role] API error:", json);
-          alert(json.details || json.error || "Nie udało się zmienić roli członka zespołu.");
-          return;
-        }
-
-        await refreshFromDb();
-      } catch (err) {
-        console.error("[set_member_role] fetch error:", err);
-        alert("Wystąpił błąd podczas zmiany roli.");
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.ok) {
+        console.error("[set_member_role] API error:", json);
+        pushToast(
+          router,
+          pathname,
+          new URLSearchParams(sp.toString()),
+          json.details || json.error || "Nie udało się zmienić roli.",
+          "err"
+        );
+        return;
       }
-    });
+
+      pushToast(router, pathname, new URLSearchParams(sp.toString()), "Zmieniono rolę.", "ok");
+      await refreshFromDb();
+    } catch (err) {
+      console.error("[set_member_role] fetch error:", err);
+      pushToast(router, pathname, new URLSearchParams(sp.toString()), "Wystąpił błąd podczas zmiany roli.", "err");
+    }
   }
 
-  function handleDelete(member: VTeamMember) {
+  async function handleDelete(member: VTeamMember) {
     if (!onDelete) return;
 
-    const ok = window.confirm(
-      `Czy na pewno chcesz usunąć członka zespołu "${fullName(member)}"?`
-    );
+    const ok = window.confirm(`Czy na pewno chcesz usunąć "${fullName(member)}"?`);
     if (!ok) return;
 
-    startTransition(async () => {
+    try {
       await onDelete(member.id);
+      pushToast(router, pathname, new URLSearchParams(sp.toString()), "Usunięto członka zespołu.", "ok");
       await refreshFromDb();
-    });
+    } catch (e: any) {
+      console.error("[TeamMembersTable] delete error:", e);
+      pushToast(router, pathname, new URLSearchParams(sp.toString()), e?.message || "Nie udało się usunąć członka zespołu.", "err");
+    }
   }
 
-  function handleResendInvite(member: VTeamMember) {
+  async function handleResendInvite(member: VTeamMember) {
     if (!onResendInvite) return;
 
-    startTransition(async () => {
+    try {
       await onResendInvite(member.id);
-      alert("Nowe zaproszenie zostało wygenerowane (wysyłka e-mail w backendzie).");
+      pushToast(router, pathname, new URLSearchParams(sp.toString()), "Zaproszenie odświeżone i wysłane ponownie.", "ok");
       await refreshFromDb();
-    });
+    } catch (e: any) {
+      console.error("[TeamMembersTable] resend invite error:", e);
+      pushToast(router, pathname, new URLSearchParams(sp.toString()), e?.message || "Nie udało się wysłać zaproszenia ponownie.", "err");
+    }
   }
 
-  function handleEditSubmit(e: React.FormEvent) {
+  async function handleEditSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!editing) return;
     if (!canEditDetails || !onEdit) return;
 
-    startTransition(async () => {
+    try {
       await onEdit({
         id: editing.id,
         first_name: form.first_name.trim() || null,
@@ -387,30 +421,46 @@ export function TeamMembersTable({
         email: form.email.trim() || null,
         phone: form.phone.trim() || null,
       });
+
       closeEditDialog();
+      pushToast(router, pathname, new URLSearchParams(sp.toString()), "Zapisano dane członka zespołu.", "ok");
       await refreshFromDb();
-    });
+    } catch (e: any) {
+      console.error("[TeamMembersTable] edit error:", e);
+      pushToast(router, pathname, new URLSearchParams(sp.toString()), e?.message || "Nie udało się zapisać zmian.", "err");
+    }
   }
 
-  const showActions =
-    !!onDelete || !!onResendInvite || (canEditDetails && !!onEdit);
+  const showActions = !!onDelete || !!onResendInvite || (canEditDetails && !!onEdit);
 
-  function MiniField({
-    label,
-    value,
-    right,
-  }: {
-    label: string;
-    value: React.ReactNode;
-    right?: React.ReactNode;
-  }) {
+  function MiniField({ label, value }: { label: string; value: React.ReactNode }) {
     return (
-      <div className="inline-flex items-center gap-2 rounded-xl border border-border/70 bg-background/40 px-3 py-1.5 text-xs">
-        <span className="text-muted-foreground">{label}</span>
-        <span className="opacity-50">·</span>
-        <span className="font-medium text-foreground">{value}</span>
-        {right ? <span className="ml-2">{right}</span> : null}
+      <div className="inline-flex items-center gap-2 rounded-xl border border-border/70 bg-background/30 px-3 py-1.5 text-xs">
+        <span className="opacity-70">{label}</span>
+        <span className="opacity-40">·</span>
+        <span className="font-medium">{value}</span>
       </div>
+    );
+  }
+
+  function DetailButton({ id, full }: { id: string; full?: boolean }) {
+    if (!canOpenDetails) return null;
+
+    return (
+      <button
+        type="button"
+        className={cx(
+          "inline-flex items-center justify-center rounded-2xl border px-3 py-2 text-xs font-semibold transition",
+          "border-emerald-500/30 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/14",
+          full ? "w-full" : ""
+        )}
+        onClick={(e) => {
+          e.stopPropagation();
+          handleCardClick(id);
+        }}
+      >
+        Sprawdź szczegóły →
+      </button>
     );
   }
 
@@ -423,56 +473,60 @@ export function TeamMembersTable({
     const crewSelectValue = m.crew_id ? m.crew_id : SEL.none;
     const roleSelectValue = m.account_role ? m.account_role : SEL.none;
 
+    const cardBase = "rounded-2xl border border-border bg-background/10 transition overflow-hidden";
+    const cardHover = clickable
+      ? "hover:bg-background/18 hover:border-border/90 focus-within:ring-2 focus-within:ring-foreground/25 cursor-pointer"
+      : "cursor-default";
+
     return (
       <div
-        className={[
-          "rounded-2xl border border-border/70 bg-card/60 shadow-sm",
-          "transition hover:bg-card/80 hover:border-foreground/15",
-          clickable ? "cursor-pointer" : "cursor-default",
-        ].join(" ")}
+        className={cx(cardBase, cardHover)}
         onClick={() => clickable && handleCardClick(m.id)}
+        role={clickable ? "button" : undefined}
+        aria-disabled={!clickable}
       >
-        <div className="p-3 space-y-2">
+        <div className="p-4 space-y-3">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="truncate text-[15px] font-semibold text-foreground leading-snug">
-                {fullName(m)}
+              <div className="truncate text-sm font-semibold leading-snug">{fullName(m)}</div>
+
+              <div className="mt-1 text-xs opacity-75 md:hidden space-y-0.5">
+                <div className="truncate">{m.email ?? "—"}</div>
+                <div className="truncate">
+                  {crewText} <span className="opacity-50">•</span> {m.phone ?? "—"}
+                </div>
               </div>
 
-              <div className="mt-1 text-xs text-muted-foreground md:hidden leading-snug">
-                <span className="block truncate">{m.email ?? "—"}</span>
-                <span className="block truncate">{m.phone ?? "—"}</span>
-                <span className="block truncate">{crewText}</span>
+              <div className="hidden md:flex flex-wrap items-center gap-2 mt-2" onClick={(e) => e.stopPropagation()}>
+                <MiniField label="Email" value={m.email ?? "—"} />
+                <MiniField label="Telefon" value={m.phone ?? "—"} />
+                <MiniField label="Brygada" value={crewText} />
               </div>
             </div>
 
-            <div className="flex flex-col items-end gap-1.5">
-              <span
-                className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium ${statusClass[m.status]}`}
-              >
+            <div className="flex flex-col items-end gap-1.5 shrink-0">
+              <span className={cx("inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium", statusClass[m.status])}>
                 {statusLabel[m.status]}
               </span>
 
-              <span className="inline-flex items-center rounded-full border border-border/70 bg-background/50 px-2.5 py-0.5 text-[11px] text-foreground/80">
+              <span className="inline-flex items-center rounded-full border border-border/70 bg-background/20 px-2.5 py-0.5 text-[11px] opacity-80">
                 {roleText}
               </span>
+
+              <div className="hidden md:block">
+                <DetailButton id={m.id} />
+              </div>
             </div>
           </div>
 
-          <div
-            className="hidden md:flex flex-wrap items-center gap-2"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <MiniField label="Email" value={m.email ?? "—"} />
-            <MiniField label="Telefon" value={m.phone ?? "—"} />
-
-            <MiniField
-              label="Brygada"
-              value={crewText}
-              right={
-                canChangeCrew && onEdit ? (
+          {(canChangeCrew || canChangeRole) ? (
+            <div className="hidden md:flex items-center gap-2 flex-wrap" onClick={(e) => e.stopPropagation()}>
+              {canChangeCrew && onEdit ? (
+                <div className="inline-flex items-center gap-2 rounded-xl border border-border/70 bg-background/30 px-3 py-1.5 text-xs">
+                  <span className="opacity-70">Brygada</span>
+                  <span className="opacity-40">·</span>
                   <select
-                    className="bg-transparent text-[11px] text-muted-foreground outline-none cursor-pointer"
+                    className="bg-transparent text-xs outline-none cursor-pointer"
                     value={crewSelectValue}
                     disabled={crewsLoading}
                     onChange={(e) => {
@@ -491,17 +545,15 @@ export function TeamMembersTable({
                       </option>
                     ))}
                   </select>
-                ) : null
-              }
-            />
+                </div>
+              ) : null}
 
-            <MiniField
-              label="Rola"
-              value={roleText}
-              right={
-                canChangeRole ? (
+              {canChangeRole ? (
+                <div className="inline-flex items-center gap-2 rounded-xl border border-border/70 bg-background/30 px-3 py-1.5 text-xs">
+                  <span className="opacity-70">Rola</span>
+                  <span className="opacity-40">·</span>
                   <select
-                    className="bg-transparent text-[11px] text-muted-foreground outline-none cursor-pointer"
+                    className="bg-transparent text-xs outline-none cursor-pointer"
                     value={roleSelectValue}
                     onChange={(e) => {
                       const v = e.target.value;
@@ -522,22 +574,22 @@ export function TeamMembersTable({
                     <option value="storeman">Magazynier</option>
                     <option value="worker">Pracownik</option>
                   </select>
-                ) : null
-              }
-            />
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div className="md:hidden">
+            <DetailButton id={m.id} full />
           </div>
 
           {showActions ? (
-            <div
-              className="mt-0.5 flex items-center justify-end gap-2"
-              onClick={(e) => e.stopPropagation()}
-            >
+            <div className="pt-2 border-t border-border/70 flex items-center justify-end gap-2" onClick={(e) => e.stopPropagation()}>
               {canEditDetails && onEdit ? (
                 <button
                   type="button"
                   className="rounded-xl border border-border/70 bg-background/40 px-3 py-1.5 text-xs hover:bg-background/60"
                   onClick={() => openEditDialog(m)}
-                  disabled={isPending}
                 >
                   Edytuj
                 </button>
@@ -548,7 +600,6 @@ export function TeamMembersTable({
                   type="button"
                   className="rounded-xl border border-border/70 bg-background/40 px-3 py-1.5 text-xs hover:bg-background/60"
                   onClick={() => handleResendInvite(m)}
-                  disabled={isPending}
                 >
                   Wyślij ponownie
                 </button>
@@ -559,7 +610,6 @@ export function TeamMembersTable({
                   type="button"
                   className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-200 hover:bg-rose-500/15"
                   onClick={() => handleDelete(m)}
-                  disabled={isPending}
                 >
                   Usuń
                 </button>
@@ -573,82 +623,78 @@ export function TeamMembersTable({
 
   return (
     <div className="space-y-4">
-      {/* Live search (kanon) */}
-      <div className="rounded-2xl border border-border bg-card p-4">
+      <div className="rounded-2xl border border-border bg-background/10 p-4">
         <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
           <div className="min-w-0">
-            <div className="text-sm font-medium">Lista członków</div>
-            <div className="text-xs text-muted-foreground">
-              Podzielone na role. W sekcjach od razu widać gdzie kończy się jedna grupa i zaczyna druga.
-            </div>
+            <div className="text-sm font-semibold">Członkowie</div>
+            <div className="text-xs opacity-70 mt-1">Szukaj po imieniu, mailu, telefonie albo brygadzie.</div>
           </div>
 
           <div className="w-full md:max-w-[520px]">
             <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="Szukaj (imię, nazwisko, email, telefon, brygada)…"
+              placeholder="Szukaj…"
               className="w-full rounded-xl border border-border bg-background/40 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-foreground/15"
             />
           </div>
         </div>
 
-        <div className="mt-2 text-[11px] text-muted-foreground">
-          Wyników: <span className="text-foreground/80 font-medium">{sorted.length}</span>
-          {isPending ? <span className="ml-2 opacity-70">· aktualizuję…</span> : null}
+        <div className="mt-2 text-[11px] opacity-70">
+          Wyników: <span className="font-medium opacity-90">{sorted.length}</span>
         </div>
       </div>
 
-      {/* SEKCJE: wyraźne odcięcia */}
       <div className="grid gap-4">
-        <RoleSection title="Właściciel" count={owners.length} hint="Najwyższe uprawnienia na koncie.">
-          {owners.map((m) => (
-            <MemberCard key={m.id} m={m} />
-          ))}
-        </RoleSection>
+        <MobileAccordion title="Właściciel" count={owners.length} hint="Najwyższe uprawnienia." defaultOpen={false}>
+          {owners.map((m) => <MemberCard key={m.id} m={m} />)}
+        </MobileAccordion>
+        <DesktopSection title="Właściciel" count={owners.length} hint="Najwyższe uprawnienia.">
+          {owners.map((m) => <MemberCard key={m.id} m={m} />)}
+        </DesktopSection>
 
-        <RoleSection title="Manager" count={managers.length} hint="Zarządzanie modułami, raportami i zespołem.">
-          {managers.map((m) => (
-            <MemberCard key={m.id} m={m} />
-          ))}
-        </RoleSection>
+        <MobileAccordion title="Manager" count={managers.length} hint="Zarządzanie modułami i zespołem.">
+          {managers.map((m) => <MemberCard key={m.id} m={m} />)}
+        </MobileAccordion>
+        <DesktopSection title="Manager" count={managers.length} hint="Zarządzanie modułami i zespołem.">
+          {managers.map((m) => <MemberCard key={m.id} m={m} />)}
+        </DesktopSection>
 
-        <RoleSection title="Brygadzista" count={foremen.length} hint="Prowadzący brygadę (zadania, załoga, prace).">
-          {foremen.map((m) => (
-            <MemberCard key={m.id} m={m} />
-          ))}
-        </RoleSection>
+        <MobileAccordion title="Brygadzista" count={foremen.length} hint="Prowadzenie brygady.">
+          {foremen.map((m) => <MemberCard key={m.id} m={m} />)}
+        </MobileAccordion>
+        <DesktopSection title="Brygadzista" count={foremen.length} hint="Prowadzenie brygady.">
+          {foremen.map((m) => <MemberCard key={m.id} m={m} />)}
+        </DesktopSection>
 
-        <RoleSection title="Magazynier" count={storemen.length} hint="Dostawy, stany, operacje magazynowe.">
-          {storemen.map((m) => (
-            <MemberCard key={m.id} m={m} />
-          ))}
-        </RoleSection>
+        <MobileAccordion title="Magazynier" count={storemen.length} hint="Operacje magazynowe.">
+          {storemen.map((m) => <MemberCard key={m.id} m={m} />)}
+        </MobileAccordion>
+        <DesktopSection title="Magazynier" count={storemen.length} hint="Operacje magazynowe.">
+          {storemen.map((m) => <MemberCard key={m.id} m={m} />)}
+        </DesktopSection>
 
-        <RoleSection title="Pracownik" count={workers.length} hint="Raporty dzienne i praca w zadaniach.">
-          {workers.map((m) => (
-            <MemberCard key={m.id} m={m} />
-          ))}
-        </RoleSection>
+        <MobileAccordion title="Pracownik" count={workers.length} hint="Codzienna praca i raporty.">
+          {workers.map((m) => <MemberCard key={m.id} m={m} />)}
+        </MobileAccordion>
+        <DesktopSection title="Pracownik" count={workers.length} hint="Codzienna praca i raporty.">
+          {workers.map((m) => <MemberCard key={m.id} m={m} />)}
+        </DesktopSection>
       </div>
 
-      {/* Modal edycji danych */}
       {editing && canEditDetails && onEdit ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
           <div className="w-full max-w-md rounded-2xl border border-border/70 bg-card/90 shadow-xl">
             <div className="flex items-start justify-between gap-3 border-b border-border/60 px-5 py-4">
               <div className="space-y-1">
                 <div className="text-sm font-semibold text-foreground">Edytuj dane</div>
-                <div className="text-xs text-muted-foreground">
-                  Zmień podstawowe dane użytkownika. Rola i brygada są osobno.
-                </div>
+                <div className="text-xs text-muted-foreground">Podstawowe dane. Rola i brygada są osobno.</div>
               </div>
 
               <button
                 type="button"
                 onClick={closeEditDialog}
                 className="rounded-xl border border-border/70 bg-background/40 px-3 py-2 text-xs hover:bg-background/60"
-                disabled={isPending}
               >
                 Zamknij
               </button>
@@ -699,17 +745,15 @@ export function TeamMembersTable({
                   type="button"
                   className="rounded-xl border border-border/70 bg-background/40 px-3 py-2 text-xs hover:bg-background/60"
                   onClick={closeEditDialog}
-                  disabled={isPending}
                 >
                   Anuluj
                 </button>
 
                 <button
                   type="submit"
-                  className="rounded-xl border border-border/70 bg-foreground/15 px-3 py-2 text-xs font-semibold hover:bg-foreground/20 disabled:opacity-60"
-                  disabled={isPending}
+                  className="rounded-xl border border-border/70 bg-foreground/15 px-3 py-2 text-xs font-semibold hover:bg-foreground/20"
                 >
-                  {isPending ? "Zapisuję…" : "Zapisz"}
+                  Zapisz
                 </button>
               </div>
             </form>

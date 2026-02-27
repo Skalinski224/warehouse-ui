@@ -15,7 +15,7 @@ const zNumeric = z.preprocess(
 );
 
 /* ------------------------------- MATERIAL LIST ------------------------------- */
-// Używana w katalogu i raportach — skrócone DTO
+/* Używana w katalogu i raportach — skrócone DTO */
 export const ZMaterialOverview = z.object({
   id: z.string().uuid(),
   title: z.string().min(1),
@@ -24,19 +24,21 @@ export const ZMaterialOverview = z.object({
   family_key: z.string().nullable().optional(),
 
   image_url: z.string().nullable().optional(),
-
-  // 🔴 DODAJ TO
   description: z.string().nullable().optional(),
 
   unit: z.string().min(1),
   base_quantity: zNumeric,
   current_quantity: zNumeric,
   stock_pct: zNumeric,
+
+  // ✅ NOWE — lokacja (bez wymuszeń)
+  inventory_location_id: z.string().uuid().nullable().optional(),
+  inventory_location_label: z.string().nullable().optional(),
+
   deleted_at: z.string().nullable().optional(),
 });
 
 export type MaterialOverview = z.infer<typeof ZMaterialOverview>;
-
 
 /* --------------------------- MATERIAL DETAIL / FORM --------------------------- */
 export const ZMaterial = z.object({
@@ -49,11 +51,17 @@ export const ZMaterial = z.object({
   image_url: z.string().nullable().optional(),
   cta_url: z.string().nullable().optional(),
   family_key: z.string().nullable().optional(),
+
+  // ✅ NOWE — lokacja
+  inventory_location_id: z.string().uuid().nullable().optional(),
+  inventory_location_label: z.string().nullable().optional(),
+
   created_at: z.string().optional(),
   updated_at: z.string().nullable().optional(),
   deleted_at: z.string().nullable().optional(),
   deleted_by: z.string().nullable().optional(),
 });
+
 export type Material = z.infer<typeof ZMaterial>;
 
 /* -------------------------- VALIDATION FOR CREATE/UPDATE -------------------------- */
@@ -65,12 +73,18 @@ export const ZMaterialCreate = ZMaterial.pick({
   current_quantity: true,
   cta_url: true,
   image_url: true,
+
+  // ✅ NOWE
+  inventory_location_id: true,
+  inventory_location_label: true,
 });
+
 export type MaterialCreateInput = z.infer<typeof ZMaterialCreate>;
 
 export const ZMaterialUpdate = ZMaterial.partial().extend({
   id: z.string().uuid(),
 });
+
 export type MaterialUpdateInput = z.infer<typeof ZMaterialUpdate>;
 
 /* ------------------------------ DAILY REPORTS DTO ------------------------------ */
@@ -81,7 +95,15 @@ export type DailyReportRow = {
   crewId: string | null;
   crewName: string;
   person: string;
+
+  // opisowe (stare)
   location: string | null;
+  place: string | null;
+
+  // ✅ magazynowa lokalizacja (jak deliveries)
+  inventoryLocationId: string | null;
+  inventoryLocationLabel: string | null;
+
   isCompleted: boolean;
   approved: boolean;
   photosCount: number | null;
@@ -96,6 +118,11 @@ export type DailyReportDetails = {
   person: string;
   location: string | null;
   place: string | null;
+
+  // ✅ magazynowa lokalizacja (jak deliveries)
+  inventoryLocationId: string | null;
+  inventoryLocationLabel: string | null;
+
   stageId: string | null;
   taskId: string | null;
   taskName: string | null;
@@ -145,13 +172,12 @@ export type TaskOption = {
 
 /* ---------------------------- INVENTORY (NEW DTO) ---------------------------- */
 /**
- * Lista sesji inwentaryzacyjnych (tabela inventory_sessions / widok listy)
- * Uwaga: trzymamy snake_case, bo tak zwraca supabase select / RPC.
+ * Lista sesji inwentaryzacyjnych
  */
 export type InventorySessionRow = {
   id: string;
   account_id: string;
-  session_date: string; // date (YYYY-MM-DD)
+  session_date: string;
   created_at: string;
   created_by: string;
   person: string | null;
@@ -162,8 +188,7 @@ export type InventorySessionRow = {
 };
 
 /**
- * Szczegóły sesji + pozycje (join inventory_sessions + inventory_items + materials)
- * Uwaga: snake_case zgodnie z DB.
+ * Szczegóły sesji + pozycje
  */
 export type InventorySessionDetailRow = {
   session_id: string;

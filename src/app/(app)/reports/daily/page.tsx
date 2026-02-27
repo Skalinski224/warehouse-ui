@@ -5,14 +5,43 @@ import DailyReportsTable from "@/components/daily-reports/DailyReportsTable";
 import { getPermissionSnapshot } from "@/lib/currentUser";
 import { can, PERM } from "@/lib/permissions";
 
+function cls(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
+
+function Kpi({
+  label,
+  value,
+  tone = "neutral",
+}: {
+  label: string;
+  value: React.ReactNode;
+  tone?: "neutral" | "ok" | "warn" | "bad";
+}) {
+  const toneCls =
+    tone === "ok"
+      ? "bg-emerald-600/10 border-emerald-500/30"
+      : tone === "warn"
+      ? "bg-amber-600/10 border-amber-500/30"
+      : tone === "bad"
+      ? "bg-red-600/10 border-red-500/30"
+      : "bg-background/20 border-border";
+
+  return (
+    <div className={cls("rounded-xl border px-3 py-2", toneCls)}>
+      <div className="text-[11px] opacity-70">{label}</div>
+      <div className="text-sm font-semibold leading-tight">{value}</div>
+    </div>
+  );
+}
+
 export default async function DailyReportsListPage() {
   const snap = await getPermissionSnapshot();
 
-  // worker → brak dostępu do raportów dziennych
   if (!can(snap, PERM.DAILY_REPORTS_READ)) {
     return (
       <div className="rounded-2xl border border-border bg-card p-4">
-        <div className="text-sm font-medium">Raporty dzienne</div>
+        <div className="text-base font-semibold">Raporty dzienne</div>
         <div className="text-xs opacity-70 mt-1">
           Nie masz uprawnień do przeglądania raportów dziennych.
         </div>
@@ -27,38 +56,42 @@ export default async function DailyReportsListPage() {
   const reports = allReports.filter((r) => r.approved);
 
   return (
-    <div className="space-y-4">
-      {/* HEADER (kanon) */}
-      <div className="flex items-start justify-between gap-3">
+    <main className="space-y-4">
+      <header className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h1 className="text-sm font-medium">Raporty dzienne</h1>
-          <p className="text-xs opacity-70">
-            Lista zatwierdzonych raportów z budowy. Filtruj po dacie, brygadzie,
-            osobie i miejscu oraz przechodź do szczegółów.
+          <h1 className="text-base font-semibold leading-tight">Raporty dzienne</h1>
+          <p className="text-xs opacity-70 mt-1">
+            Lista zatwierdzonych raportów. Filtruj po dacie, brygadzie, osobie, lokalizacji i
+            miejscu — kliknij w pozycję, aby zobaczyć szczegóły.
           </p>
         </div>
 
-        {/* META chips (kanon) */}
-        <div className="flex items-center gap-2">
-          <span className="text-[11px] px-2 py-1 rounded bg-background/60 border border-border">
-            Widok: <span className="font-semibold">zatwierdzone</span>
-          </span>
-          <span className="text-[11px] px-2 py-1 rounded bg-background/60 border border-border">
-            Liczba: <span className="font-semibold">{reports.length}</span>
-          </span>
+        <div className="hidden md:grid grid-cols-2 gap-2">
+          <Kpi label="Widok" value="zatwierdzone" tone="ok" />
+          <Kpi label="Liczba" value={reports.length} />
         </div>
-      </div>
+      </header>
 
-      {/* CONTENT CARD (kanon) */}
-      <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
-        {reports.length === 0 ? (
-          <div className="text-sm opacity-70">
-            Brak zatwierdzonych raportów do wyświetlenia.
+      <section className="rounded-2xl border border-border bg-card overflow-hidden">
+        <div className="p-3 md:p-4 border-b border-border bg-background/10">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[11px] opacity-70">
+              {reports.length === 0 ? "Brak danych" : `Wyników: ${reports.length}`}
+            </div>
+            <div className="md:hidden text-[11px] opacity-70">Zatwierdzone</div>
           </div>
-        ) : (
-          <DailyReportsTable reports={reports} snapshot={snap} />
-        )}
-      </div>
-    </div>
+        </div>
+
+        <div className="p-3 md:p-4">
+          {reports.length === 0 ? (
+            <div className="rounded-2xl border border-border bg-background/20 p-4 text-sm opacity-70">
+              Brak zatwierdzonych raportów do wyświetlenia.
+            </div>
+          ) : (
+            <DailyReportsTable reports={reports} snapshot={snap} />
+          )}
+        </div>
+      </section>
+    </main>
   );
 }

@@ -2,9 +2,11 @@
 import type React from "react";
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import BackButton from "@/components/BackButton";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { can, PERM, type PermissionSnapshot } from "@/lib/permissions";
 import { approveDailyReport, deleteDailyReportUnapproved } from "./actions";
+import ConfirmActionDialog from "@/components/ConfirmActionDialog";
 
 export const dynamic = "force-dynamic";
 
@@ -16,14 +18,22 @@ type ReportItem = {
 
 type PendingRow = {
   id: string;
-  date: string;
+  date: string; // ✅ data raportu (wybrana w formularzu)
   person: string;
   crew_name: string | null;
   place: string | null;
-  created_at: string | null;
+  created_at: string | null; // ✅ faktyczna data utworzenia w DB
   submitted_at: string | null;
   items: ReportItem[] | null;
+
+  // ✅ lokalizacja magazynowa (FK daily_reports.inventory_location_id -> inventory_locations)
+  inventory_locations?: { label: string | null } | null;
 };
+
+function isNextRedirect(err: unknown) {
+  const d = (err as any)?.digest;
+  return typeof d === "string" && d.startsWith("NEXT_REDIRECT");
+}
 
 function fmtDate(isoOrDate: string) {
   const d = new Date(isoOrDate);
@@ -53,9 +63,7 @@ function toNum(v: unknown): number {
   return 0;
 }
 
-function summarizeItems(
-  items: ReportItem[] | null | undefined
-): { distinctCount: number; totalQty: number } {
+function summarizeItems(items: ReportItem[] | null | undefined): { distinctCount: number; totalQty: number } {
   const arr = Array.isArray(items) ? items : [];
   const ids = new Set<string>();
   let total = 0;
@@ -90,13 +98,7 @@ function Pill({
       ? "border-amber-500/35 bg-amber-500/10 text-amber-300"
       : "border-border bg-background/60 text-foreground/80";
 
-  return (
-    <span
-      className={`inline-flex items-center rounded px-2 py-1 text-[11px] border ${cls}`}
-    >
-      {children}
-    </span>
-  );
+  return <span className={`inline-flex items-center rounded px-2 py-1 text-[11px] border ${cls}`}>{children}</span>;
 }
 
 function MetaRow({ label, value }: { label: string; value: React.ReactNode }) {
@@ -108,31 +110,11 @@ function MetaRow({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-function EmptyState({
-  title,
-  desc,
-  ctaHref,
-  ctaLabel,
-}: {
-  title: string;
-  desc: string;
-  ctaHref?: string;
-  ctaLabel?: string;
-}) {
+function EmptyState({ title, desc }: { title: string; desc: string }) {
   return (
     <div className="rounded-2xl border border-border bg-card p-6">
       <div className="text-sm font-medium">{title}</div>
       <div className="text-xs text-muted-foreground mt-1">{desc}</div>
-      {ctaHref && ctaLabel ? (
-        <div className="mt-4">
-          <Link
-            href={ctaHref}
-            className="inline-flex items-center justify-center rounded-xl border border-border bg-background px-4 py-2 text-xs hover:bg-foreground/5 transition"
-          >
-            {ctaLabel} →
-          </Link>
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -159,7 +141,7 @@ export default async function DailyReportsLandingPage() {
   if (showQueue) {
     const { data: rows, error: listErr } = await supabase
       .from("daily_reports")
-      .select("id,date,person,crew_name,place,created_at,submitted_at,items")
+      .select("id,date,person,crew_name,place,created_at,submitted_at,items,inventory_locations(label)")
       .eq("approved", false)
       .not("submitted_at", "is", null) // ✅ kolejka
       .is("deleted_at", null)
@@ -173,9 +155,9 @@ export default async function DailyReportsLandingPage() {
     const byCrew = pending.filter((r) => !!r.crew_name).length;
 
     return (
-      <main className="p-6 space-y-4">
-        {/* HEADER (KANON) */}
-        <header className="flex flex-wrap items-start justify-between gap-3">
+      <div className="space-y-4">
+        {/* HEADER */}
+        <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
             <h1 className="text-sm font-medium">Raporty dzienne</h1>
             <p className="text-xs opacity-70">
@@ -183,22 +165,29 @@ export default async function DailyReportsLandingPage() {
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
-            <Pill tone="warn">
-              Oczekujące: <span className="font-semibold ml-1">{total}</span>
-            </Pill>
-            <Pill>
-              Brygady: <span className="font-semibold ml-1">{byCrew}</span>
-            </Pill>
+          {/* PRAWA STRONA: CTA + BACK (prawa krawędź) */}
+          <div className="flex flex-col items-end gap-2">
+            <div className="flex w-full flex-wrap items-center justify-end gap-2">
+              {canCreate ? (
+                <Link
+                  href="/daily-reports/new"
+                  className="inline-flex items-center justify-center rounded border border-border bg-white text-black px-4 py-2 text-xs font-medium hover:bg-white/90 transition"
+                >
+                  + Dodaj raport
+                </Link>
+              ) : null}
 
-            {canCreate ? (
-              <Link
-                href="/daily-reports/new"
-                className="inline-flex items-center justify-center rounded-xl border border-border bg-background px-4 py-2 text-xs hover:bg-foreground/5 transition"
-              >
-                + Dodaj raport
-              </Link>
-            ) : null}
+              <BackButton />
+            </div>
+
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <Pill tone="warn">
+                Oczekujące: <span className="font-semibold ml-1">{total}</span>
+              </Pill>
+              <Pill>
+                Brygady: <span className="font-semibold ml-1">{byCrew}</span>
+              </Pill>
+            </div>
           </div>
         </header>
 
@@ -206,9 +195,7 @@ export default async function DailyReportsLandingPage() {
         {pending.length === 0 ? (
           <EmptyState
             title="Brak raportów oczekujących"
-            desc="Jeśli ktoś zapisze raport (submitted_at), pojawi się tutaj do zatwierdzenia."
-            ctaHref={canCreate ? "/daily-reports/new" : undefined}
-            ctaLabel={canCreate ? "Dodaj raport" : undefined}
+            desc="Kiedy ktoś doda nowy raport, pojawi się tutaj do zatwierdzenia. Zobaczą go tylko osoby uprawnione: owner, site manager i magazynier."
           />
         ) : (
           <section className="space-y-3">
@@ -216,16 +203,41 @@ export default async function DailyReportsLandingPage() {
               const s = summarizeItems(r.items);
               const mode = r.crew_name ? "Brygada" : "Solo / Ad-hoc";
 
+              const headerDate = r.created_at ? fmtDate(r.created_at) : fmtDate(r.date);
+              const invLabel = String(r.inventory_locations?.label ?? "").trim() || "—";
+
+              async function onApprove() {
+                "use server";
+                try {
+                  await approveDailyReport(r.id);
+                  redirect(`/daily-reports?toast=${encodeURIComponent("Raport zatwierdzony.")}&tone=ok`);
+                } catch (e) {
+                  if (isNextRedirect(e)) throw e;
+                  console.error("[daily-reports/page] approve error:", e);
+                  redirect(`/daily-reports?toast=${encodeURIComponent("Nie udało się zatwierdzić raportu.")}&tone=err`);
+                }
+              }
+
+              async function onDelete() {
+                "use server";
+                try {
+                  await deleteDailyReportUnapproved(r.id);
+                  redirect(`/daily-reports?toast=${encodeURIComponent("Raport odrzucony (usunięty).")}&tone=ok`);
+                } catch (e) {
+                  if (isNextRedirect(e)) throw e;
+                  console.error("[daily-reports/page] delete error:", e);
+                  redirect(`/daily-reports?toast=${encodeURIComponent("Nie udało się odrzucić raportu.")}&tone=err`);
+                }
+              }
+
               return (
                 <div key={r.id} className="rounded-2xl border border-border bg-card p-4">
                   <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                    {/* LEWA: opis “co to jest” */}
+                    {/* LEWA */}
                     <div className="min-w-0 space-y-3">
                       <div className="flex flex-wrap items-center gap-2">
                         <div className="text-sm font-semibold">
-                          {fmtDate(r.date)}{" "}
-                          <span className="text-foreground/60 font-normal">—</span>{" "}
-                          {r.person}
+                          {headerDate} <span className="text-foreground/60 font-normal">—</span> {r.person}
                         </div>
 
                         <Pill>
@@ -245,26 +257,18 @@ export default async function DailyReportsLandingPage() {
                         </Pill>
                       </div>
 
-                      {/* META BOX (KANON) */}
+                      {/* META */}
                       <div className="grid gap-2 rounded-2xl border border-border bg-background/20 p-3 sm:max-w-xl">
-                        <MetaRow label="Zgłoszono" value={fmtDateTime(r.submitted_at)} />
+                        <MetaRow label="Zgłoszono" value={fmtDate(r.date)} />
                         <MetaRow label="Utworzono" value={fmtDateTime(r.created_at)} />
-                        <MetaRow
-                          label="ID"
-                          value={<span className="font-mono text-[11px]">{r.id}</span>}
-                        />
+                        <MetaRow label="Lokalizacja" value={invLabel} />
                       </div>
                     </div>
 
-                    {/* PRAWA: akcje */}
-                    <div className="flex flex-wrap gap-2 lg:justify-end">
+                    {/* PRAWA: akcje (zawsze do prawej) */}
+                    <div className="flex flex-wrap gap-2 justify-end">
                       {canApprove ? (
-                        <form
-                          action={async () => {
-                            "use server";
-                            await approveDailyReport(r.id);
-                          }}
-                        >
+                        <form action={onApprove}>
                           <button
                             type="submit"
                             className="rounded-xl border border-border bg-foreground text-background px-4 py-2 text-xs font-semibold hover:bg-foreground/90 transition"
@@ -282,19 +286,20 @@ export default async function DailyReportsLandingPage() {
                       </Link>
 
                       {canDeletePending ? (
-                        <form
-                          action={async () => {
-                            "use server";
-                            await deleteDailyReportUnapproved(r.id);
-                          }}
-                        >
-                          <button
-                            type="submit"
-                            className="rounded-xl border border-destructive/40 bg-background px-4 py-2 text-xs text-destructive hover:bg-destructive/10 transition"
-                          >
-                            Usuń
-                          </button>
-                        </form>
+                        <ConfirmActionDialog
+                          triggerLabel="Usuń"
+                          triggerClassName="rounded-xl border border-destructive/40 bg-background px-4 py-2 text-xs text-destructive hover:bg-destructive/10 transition"
+                          title="Odrzucić raport dzienny?"
+                          body={
+                            <>
+                              <div>Ta operacja usunie raport z kolejki (nie zatwierdzi zużyć).</div>
+                              <div>Nie można jej cofnąć.</div>
+                            </>
+                          }
+                          confirmLabel="Tak, odrzuć"
+                          confirmClassName="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-2 text-xs text-destructive hover:bg-destructive/20 transition"
+                          action={onDelete}
+                        />
                       ) : null}
                     </div>
                   </div>
@@ -303,36 +308,44 @@ export default async function DailyReportsLandingPage() {
             })}
           </section>
         )}
-      </main>
+      </div>
     );
   }
 
-  // KANON: jeśli nie ma kolejki, to landing “szybki start”
+  // KANON: jeśli nie ma kolejki, to landing “jak Dostawy” (dla foreman/worker)
   if (!canCreate) {
     return (
-      <main className="p-6">
+      <div className="space-y-4">
+        <div className="flex justify-end">
+          <BackButton />
+        </div>
         <EmptyState title="Brak uprawnień" desc="Nie masz dostępu do tworzenia raportów dziennych." />
-      </main>
+      </div>
     );
   }
 
   return (
-    <main className="p-6">
-      <div className="rounded-2xl border border-border bg-card p-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <div className="text-sm font-medium">Raporty dzienne</div>
-          <div className="text-xs opacity-70">
-            Dodaj nowy raport dzienny lub przejdź do raportów, jeśli masz uprawnienia.
-          </div>
-        </div>
+    <div className="space-y-6">
+      <div className="flex justify-end">
+        <BackButton />
+      </div>
 
+      <header className="space-y-2">
+        <h1 className="text-sm font-medium">Raporty dzienne</h1>
+        <p className="text-xs opacity-70">
+          Dodaj raport dzienny. Po przejściu do podsumowania trafi do zatwierdzenia (widoczne tylko dla owner, site
+          manager i magazynier).
+        </p>
+      </header>
+
+      <div className="flex justify-center">
         <Link
           href="/daily-reports/new"
-          className="inline-flex items-center justify-center rounded-xl border border-border bg-foreground text-background px-5 py-2 text-xs font-semibold hover:bg-foreground/90 transition"
+          className="w-full max-w-xl py-6 rounded-2xl border border-border bg-foreground text-background text-base font-medium hover:bg-foreground/90 transition text-center"
         >
-          + Dodaj raport dzienny
+          + Dodaj nowy raport
         </Link>
       </div>
-    </main>
+    </div>
   );
 }

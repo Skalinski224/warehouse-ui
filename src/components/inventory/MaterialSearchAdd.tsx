@@ -3,19 +3,13 @@
 
 import { useEffect, useMemo, useState, useTransition } from "react";
 
-type MaterialOption = {
-  id: string;
-  title: string;
-  unit: string | null;
-};
+type MaterialOption = { id: string; title: string; unit: string | null };
 
 export default function MaterialSearchAdd(props: {
   sessionId: string;
   disabled?: boolean;
-
   searchMaterials: (q: string) => Promise<{ rows: MaterialOption[] }>;
   addItem: (sessionId: string, materialId: string) => Promise<any>;
-
   onAdded?: () => void;
 }) {
   const [q, setQ] = useState("");
@@ -38,7 +32,6 @@ export default function MaterialSearchAdd(props: {
     }
 
     let alive = true;
-
     const t = setTimeout(() => {
       props
         .searchMaterials(term)
@@ -85,14 +78,14 @@ export default function MaterialSearchAdd(props: {
         placeholder="Wyszukaj i dodaj materiał…"
         disabled={disabled}
         className={[
-          "w-full rounded-xl border border-border bg-background px-3 py-2 text-xs",
+          "w-full rounded-md border border-border bg-background px-3 py-2 text-xs",
           "hover:bg-background/30 focus:outline-none focus:ring-2 focus:ring-foreground/15",
           "disabled:opacity-50",
         ].join(" ")}
       />
 
       {showDropdown && (
-        <div className="absolute z-20 mt-2 w-full overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+        <div className="absolute z-20 mt-2 w-full overflow-hidden rounded-md border border-border bg-card shadow-sm">
           <div className="max-h-56 overflow-auto">
             {rows.map((m) => (
               <button

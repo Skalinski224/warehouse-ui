@@ -6,6 +6,9 @@ import BackButton from "@/components/BackButton";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { restoreMaterial } from "@/lib/actions";
 import { PERM } from "@/lib/permissions";
+import { fetchInventoryLocations } from "@/lib/queries/inventoryLocations";
+
+import MaterialsDeletedSearchPanel from "@/app/(app)/materials/_components/MaterialsDeletedSearchPanel";
 
 type SnapshotA = { role?: string | null; permissions?: string[] };
 type SnapshotRow = { key: string; allowed: boolean };
@@ -20,7 +23,6 @@ async function getSnapshot(): Promise<Snapshot> {
   const { data, error } = await sb.rpc("my_permissions_snapshot");
   if (error || !data) return { role: null, permSet: new Set() };
 
-  // ✅ Format A: { role, permissions } lub [ { role, permissions } ]
   const obj = Array.isArray(data) ? (data[0] ?? null) : data;
   if (obj && typeof obj === "object") {
     const a = obj as SnapshotA;
@@ -31,7 +33,6 @@ async function getSnapshot(): Promise<Snapshot> {
     }
   }
 
-  // ✅ Format B: [{ key, allowed }]
   if (Array.isArray(data)) {
     const rows = data as any as SnapshotRow[];
     return {
@@ -52,7 +53,6 @@ function can(s: Snapshot, key: string) {
   return s.permSet.has(key);
 }
 
-// ✅ Wejście: tylko storeman/owner/manager (twardo po roli)
 function canEnterDeleted(s: Snapshot) {
   const r = (s.role ?? "").toLowerCase();
   return r === "owner" || r === "manager" || r === "storeman";
@@ -100,10 +100,13 @@ type MaterialRowBase = {
   image_url: string | null;
   deleted_at: string | null;
   created_at: string | null;
+
+  inventory_location_id?: string | null;
+  inventory_location_label?: string | null;
 };
 
 type MaterialRowWithDeletedBy = MaterialRowBase & {
-  deleted_by?: string | null; // opcjonalnie
+  deleted_by?: string | null;
 };
 
 type TeamMemberMini = {
@@ -136,15 +139,62 @@ async function fetchDeletedByMember(
   return null;
 }
 
-/** Server Action – restore pojedynczego materiału */
 async function doRestore(formData: FormData) {
   "use server";
   const snap = await getSnapshot();
   if (!can(snap, PERM.MATERIALS_SOFT_DELETE)) return;
 
-  const id = String(formData.get("id") || "");
-  if (id) await restoreMaterial(id);
+  const id = String(formData.get("id") || "").trim();
+
+  // paramy do powrotu (żeby UX po restore był “pokaż toast” i zostań w filtrach)
+  const q = formData.get("q")?.toString().trim() || "";
+  const sort = formData.get("sort")?.toString() || "deleted_at";
+  const dir = formData.get("dir")?.toString() || "desc";
+  const loc = formData.get("loc")?.toString().trim() || "";
+  const page = formData.get("page")?.toString() || "1";
+
+  const p = new URLSearchParams();
+  if (q) p.set("q", q);
+  if (loc) p.set("loc", loc);
+  p.set("sort", sort);
+  p.set("dir", dir);
+  p.set("page", page);
+
+  if (!id) {
+    p.set("toast", "Nie udało się przywrócić materiału.");
+    p.set("tone", "err");
+    redirect(`/materials/deleted?${p.toString()}`);
+  }
+
+  // ✅ WAŻNE: redirect() nie może być w try/catch, bo redirect rzuca wyjątek
+  let ok = false;
+
+  try {
+    await restoreMaterial(id);
+    ok = true;
+  } catch {
+    ok = false;
+  }
+
+  if (ok) {
+    p.set("toast", "Materiał został przywrócony pomyślnie.");
+    p.set("tone", "ok");
+  } else {
+    p.set("toast", "Nie udało się przywrócić materiału.");
+    p.set("tone", "err");
+  }
+
+  redirect(`/materials/deleted?${p.toString()}`);
 }
+
+// --- stałe selekty (bez dynamicznego template stringa) ---
+const SELECT_BASE = "id,title,unit,base_quantity,current_quantity,image_url,deleted_at,created_at";
+const SELECT_WITH_DELETED_BY =
+  "id,title,unit,base_quantity,current_quantity,image_url,deleted_at,created_at,deleted_by";
+const SELECT_WITH_LOC =
+  "id,title,unit,base_quantity,current_quantity,image_url,deleted_at,created_at,inventory_location_id,inventory_location_label";
+const SELECT_WITH_ALL =
+  "id,title,unit,base_quantity,current_quantity,image_url,deleted_at,created_at,deleted_by,inventory_location_id,inventory_location_label";
 
 export default async function DeletedMaterialsPage({
   searchParams = {},
@@ -154,58 +204,142 @@ export default async function DeletedMaterialsPage({
   const sb = await supabaseServer();
   const snap = await getSnapshot();
 
-  // ✅ Gate wejścia (role-based)
   if (!canEnterDeleted(snap)) redirect("/materials");
 
-  // ✅ Restore tylko jeśli permission
   const canRestore = can(snap, PERM.MATERIALS_SOFT_DELETE);
 
-  // Params
-  const qRaw = sp(searchParams, "q");
-  const q = (qRaw ?? "").trim();
+  const q = (sp(searchParams, "q") ?? "").trim();
+  const loc = (sp(searchParams, "loc") ?? "").trim();
 
   const sortRaw = (sp(searchParams, "sort") ?? "deleted_at") as SortKey;
-  const sort: SortKey = (SORT_KEYS as readonly string[]).includes(sortRaw)
-    ? sortRaw
-    : "deleted_at";
+  const sort: SortKey = (SORT_KEYS as readonly string[]).includes(sortRaw) ? sortRaw : "deleted_at";
 
   const dirRaw = (sp(searchParams, "dir") ?? "desc") as Dir;
   const dir: Dir = (DIRS as readonly string[]).includes(dirRaw) ? dirRaw : "desc";
 
   const page = Math.max(1, Number(sp(searchParams, "page") ?? 1));
-  const limit = 100; // jak /materials
+  const limit = 100;
   const offset = (page - 1) * limit;
 
-  // Query: tylko usunięte, z fallbackiem jeśli nie ma deleted_by
-  const tryWithDeletedBy = await sb
+  // --- PROBE: sprawdź czy kolumny istnieją (minimalny select) ---
+  const probe = await sb
     .from("materials")
-    .select(
-      "id,title,unit,base_quantity,current_quantity,image_url,deleted_at,created_at,deleted_by",
-      { count: "exact" }
-    )
-    .not("deleted_at", "is", null);
+    .select("id,deleted_by,inventory_location_id,inventory_location_label")
+    .not("deleted_at", "is", null)
+    .range(0, 0);
 
-  const missingDeletedBy =
-    tryWithDeletedBy.error?.message?.toLowerCase?.().includes("column") &&
-    tryWithDeletedBy.error.message.toLowerCase().includes("deleted_by");
+  const probeMsg = (probe.error?.message ?? "").toLowerCase();
+  const missingDeletedBy = probeMsg.includes("column") && probeMsg.includes("deleted_by");
+  const missingLocCols =
+    probeMsg.includes("column") &&
+    (probeMsg.includes("inventory_location_id") || probeMsg.includes("inventory_location_label"));
 
-  let query = missingDeletedBy
-    ? sb
-        .from("materials")
-        .select(
-          "id,title,unit,base_quantity,current_quantity,image_url,deleted_at,created_at",
-          { count: "exact" }
-        )
-        .not("deleted_at", "is", null)
-    : sb
-        .from("materials")
-        .select(
-          "id,title,unit,base_quantity,current_quantity,image_url,deleted_at,created_at,deleted_by",
-          { count: "exact" }
-        )
-        .not("deleted_at", "is", null);
+  // ✅ WSZYSTKIE lokacje (aktywne + usunięte) + fallback z materials (historycznie)
+  const locationsRaw = await fetchInventoryLocations({ includeDeleted: true });
+
+  type LocEntry = {
+    id: string;
+    label: string;
+    kind: "active" | "deleted" | "archived";
+  };
+
+  const locMap = new Map<string, LocEntry>();
+
+  // 1) inventory_locations: aktywne + usunięte (najbardziej zaufane)
+  for (const l of locationsRaw as any[]) {
+    const id = String(l?.id ?? "").trim();
+    if (!id) continue;
+
+    const baseLabel = String(l?.label ?? "").trim() || "—";
+    const isDeleted = Boolean(l?.deleted_at);
+
+    locMap.set(id, {
+      id,
+      label: isDeleted ? `${baseLabel} (usunięta)` : baseLabel,
+      kind: isDeleted ? "deleted" : "active",
+    });
+  }
+
+  // 2) fallback z materials: archiwalne (mogą istnieć po hard-delete lokacji)
+  if (!missingLocCols) {
+    const hist = await sb
+      .from("materials")
+      .select("inventory_location_id,inventory_location_label")
+      .not("inventory_location_id", "is", null)
+      .limit(2000);
+
+    if (hist.data && !hist.error) {
+      for (const r of hist.data as any[]) {
+        const id = String(r?.inventory_location_id ?? "").trim();
+        if (!id) continue;
+
+        // jeśli inventory_locations już ma tę lokację, nie dokładamy archiwalnej kopii
+        if (locMap.has(id)) continue;
+
+        const baseLabel = String(r?.inventory_location_label ?? "").trim();
+        const label = baseLabel && baseLabel !== "—" ? `${baseLabel} (archiwalna)` : "Archiwalna lokacja";
+
+        locMap.set(id, { id, label, kind: "archived" });
+      }
+    }
+  }
+
+  // 3) sort: aktywne → usunięte → archiwalne, a w środku po label
+  const ORDER: Record<LocEntry["kind"], number> = {
+    active: 0,
+    deleted: 1,
+    archived: 2,
+  };
+
+  const locations = Array.from(locMap.values())
+    .sort((a, b) => {
+      const da = ORDER[a.kind] - ORDER[b.kind];
+      if (da !== 0) return da;
+      return a.label.localeCompare(b.label, "pl");
+    })
+    .map((x) => ({ id: x.id, label: x.label }));
+
+  // Jeśli user filtruje po loc, a nie ma kolumn -> UX: pusto
+  if (loc && missingLocCols) {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-start justify-between gap-3">
+          <h1 className="text-2xl font-semibold">Katalog materiałów</h1>
+          <BackButton className="card inline-flex items-center px-3 py-2 text-xs font-medium" />
+        </div>
+
+        <div className="rounded-2xl border border-border bg-card p-4 space-y-4">
+          <div>
+            <div className="text-sm opacity-70">Widok</div>
+            <div className="text-lg font-semibold">Usunięte materiały</div>
+          </div>
+
+          <div className="rounded-2xl border border-border bg-background/20 p-4">
+            <MaterialsDeletedSearchPanel initial={{ q, sort, dir, page, loc }} locations={locations} />
+          </div>
+        </div>
+
+        <div className="border border-dashed border-border rounded p-8 text-center text-sm opacity-75">
+          Ta baza nie ma jeszcze kolumn lokacji dla materiałów — filtr lokacji nie może działać.
+        </div>
+      </div>
+    );
+  }
+
+  // wybierz bezpieczny select
+  const selectStr =
+    !missingDeletedBy && !missingLocCols
+      ? SELECT_WITH_ALL
+      : !missingDeletedBy && missingLocCols
+      ? SELECT_WITH_DELETED_BY
+      : missingDeletedBy && !missingLocCols
+      ? SELECT_WITH_LOC
+      : SELECT_BASE;
+
+  let query = sb.from("materials").select(selectStr, { count: "exact" }).not("deleted_at", "is", null);
 
   if (q) query = query.ilike("title", `%${q}%`);
+  if (loc && !missingLocCols) query = query.eq("inventory_location_id", loc);
 
   query = query.order(sort, {
     ascending: dir === "asc",
@@ -216,101 +350,61 @@ export default async function DeletedMaterialsPage({
 
   if (error) {
     return (
-      <div className="p-6 space-y-4">
+      <div className="space-y-4">
         <div className="rounded-2xl border border-border bg-card p-4 flex items-center justify-between gap-3">
           <h1 className="text-2xl font-semibold">Usunięte materiały</h1>
           <BackButton className="card inline-flex items-center px-3 py-2 text-xs font-medium" />
         </div>
 
-        <pre className="text-red-400 text-sm whitespace-pre-wrap">
-          DB error: {error.message}
-        </pre>
+        <pre className="text-red-400 text-sm whitespace-pre-wrap">DB error: {error.message}</pre>
       </div>
     );
   }
 
-  const rows = (data ?? []) as MaterialRowWithDeletedBy[];
+  const rows: MaterialRowWithDeletedBy[] = (Array.isArray(data) ? data : []).map((m: any) => ({
+    id: String(m.id),
+    title: String(m.title ?? ""),
+    unit: String(m.unit ?? ""),
+    base_quantity: toNum(m.base_quantity),
+    current_quantity: toNum(m.current_quantity),
+    image_url: m.image_url ?? null,
+    deleted_at: m.deleted_at ?? null,
+    created_at: m.created_at ?? null,
+    inventory_location_id: m.inventory_location_id ?? null,
+    inventory_location_label: m.inventory_location_label ?? null,
+    deleted_by: m.deleted_by ?? null,
+  }));
 
-  const baseUrl = "/materials/deleted";
-  const mkQuery = (overrides: Record<string, string | number>) => {
-    const p = new URLSearchParams();
-    if (q) p.set("q", q);
-    p.set("sort", sort);
-    p.set("dir", dir);
-    p.set("page", String(overrides.page ?? page));
-    return `${baseUrl}?${p.toString()}`;
+  const mkHref = (p: number) => {
+    const s = new URLSearchParams();
+    if (q) s.set("q", q);
+    if (loc) s.set("loc", loc);
+    s.set("sort", sort);
+    s.set("dir", dir);
+    s.set("page", String(p));
+    return `/materials/deleted?${s.toString()}`;
   };
 
   return (
-    <div className="p-6 space-y-6">
-      {/* ✅ Panel: header + toolbar (szare tło) */}
+    <div className="space-y-6">
+      <div className="flex items-start justify-between gap-3">
+        <h1 className="text-2xl font-semibold">Katalog materiałów</h1>
+        <BackButton className="card inline-flex items-center px-3 py-2 text-xs font-medium" />
+      </div>
+
       <div className="rounded-2xl border border-border bg-card p-4 space-y-4">
         <div className="flex items-center justify-between gap-3">
-          <h1 className="text-2xl font-semibold">Usunięte materiały</h1>
-
-          {/* ✅ Cofnij = BackButton, w panelu */}
-          <BackButton className="card inline-flex items-center px-3 py-2 text-xs font-medium" />
+          <div>
+            <div className="text-sm opacity-70">Widok</div>
+            <div className="text-lg font-semibold">Usunięte materiały</div>
+          </div>
         </div>
 
-        {/* Toolbar (prosty, spójny) */}
-        <div className="flex flex-col gap-3">
-          <form method="GET" className="w-full">
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                name="q"
-                placeholder="Szukaj po nazwie…"
-                defaultValue={q}
-                className="w-full md:max-w-[520px] border border-border bg-background rounded px-3 py-2"
-              />
-              <input type="hidden" name="sort" value={sort} />
-              <input type="hidden" name="dir" value={dir} />
-              <input type="hidden" name="page" value="1" />
-              <button className="hidden md:inline-flex border border-border rounded px-3 py-2 bg-card hover:bg-card/80">
-                Szukaj
-              </button>
-            </div>
-          </form>
-
-          <div className="hidden md:flex flex-wrap items-end gap-3">
-            <form method="GET" className="flex flex-wrap items-end gap-2">
-              {q ? <input type="hidden" name="q" value={q} /> : null}
-              <input type="hidden" name="page" value="1" />
-
-              <label className="text-sm flex items-center gap-2">
-                Sortuj:
-                <select
-                  name="sort"
-                  defaultValue={sort}
-                  className="border border-border bg-background rounded px-2 py-2"
-                >
-                  <option value="deleted_at">Data usunięcia</option>
-                  <option value="title">Tytuł</option>
-                  <option value="created_at">Data dodania</option>
-                </select>
-              </label>
-
-              <label className="text-sm flex items-center gap-2">
-                Kierunek:
-                <select
-                  name="dir"
-                  defaultValue={dir}
-                  className="border border-border bg-background rounded px-2 py-2"
-                >
-                  <option value="desc">Malejąco</option>
-                  <option value="asc">Rosnąco</option>
-                </select>
-              </label>
-
-              <button className="border border-border rounded px-3 py-2 bg-card hover:bg-card/80">
-                Zastosuj
-              </button>
-            </form>
-          </div>
+        <div className="rounded-2xl border border-border bg-background/20 p-4">
+          <MaterialsDeletedSearchPanel initial={{ q, sort, dir, page, loc }} locations={locations} />
         </div>
       </div>
 
-      {/* Lista — identyczne karty jak /materials */}
       {rows.length === 0 ? (
         <div className="border border-dashed border-border rounded p-8 text-center text-sm opacity-75">
           Brak usuniętych materiałów.
@@ -323,37 +417,27 @@ export default async function DeletedMaterialsPage({
               const cur = toNum(m.current_quantity);
               const pct = base > 0 ? Math.round((cur / base) * 100) : 0;
 
-              const deletedByMember = m.deleted_at
-                ? await fetchDeletedByMember(sb, (m as any).deleted_by ?? null)
-                : null;
+              const deletedByMember =
+                m.deleted_at && (m as any).deleted_by ? await fetchDeletedByMember(sb, (m as any).deleted_by ?? null) : null;
+
+              const locLabel = (m as any)?.inventory_location_label ?? "—";
 
               return (
                 <li
                   key={m.id}
-                  className="rounded-2xl border border-border bg-card overflow-hidden"
+                  className="rounded-2xl border border-border bg-card overflow-hidden transition hover:bg-background/10 hover:border-border/80"
                 >
-                  {/* Klikalna część */}
-                  <Link
-                    href={`/materials/${m.id}`}
-                    className="block hover:bg-background/10 transition"
-                  >
+                  <Link href={`/materials/${m.id}`} className="block transition hover:bg-background/10">
                     <div className="p-4">
                       <div className="flex gap-4">
                         <div className="w-28 h-28 rounded-xl overflow-hidden bg-background/50 border border-border flex-shrink-0 relative">
                           {m.image_url ? (
                             // eslint-disable-next-line @next/next/no-img-element
-                            <img
-                              src={m.image_url}
-                              alt=""
-                              className="absolute inset-0 h-full w-full object-cover"
-                            />
+                            <img src={m.image_url} alt="" className="absolute inset-0 h-full w-full object-cover" />
                           ) : (
-                            <div className="h-full w-full flex items-center justify-center text-xs opacity-60">
-                              brak zdjęcia
-                            </div>
+                            <div className="h-full w-full flex items-center justify-center text-xs opacity-60">brak zdjęcia</div>
                           )}
 
-                          {/* ✅ Znacznik na dole pod zdjęciem */}
                           <div className="absolute bottom-2 left-2 text-[11px] px-2 py-1 rounded bg-red-500/20 border border-red-500/30 text-red-200">
                             usunięty
                           </div>
@@ -362,9 +446,7 @@ export default async function DeletedMaterialsPage({
                         <div className="min-w-0 flex-1">
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <div className="font-semibold truncate">
-                                {m.title}
-                              </div>
+                              <div className="font-semibold truncate">{m.title}</div>
 
                               <div className="mt-1 text-xs opacity-70">
                                 Usunięto: {fmtWhen(m.deleted_at)}
@@ -372,53 +454,63 @@ export default async function DeletedMaterialsPage({
                                   <>
                                     {" "}
                                     <span className="opacity-50">·</span> przez{" "}
-                                    {deletedByMember.first_name ||
-                                    deletedByMember.last_name
-                                      ? `${deletedByMember.first_name ?? ""} ${
-                                          deletedByMember.last_name ?? ""
-                                        }`.trim()
+                                    {deletedByMember.first_name || deletedByMember.last_name
+                                      ? `${deletedByMember.first_name ?? ""} ${deletedByMember.last_name ?? ""}`.trim()
                                       : deletedByMember.email ?? "nieznany"}
                                   </>
                                 ) : null}
                               </div>
                             </div>
 
-                            <span className="text-[11px] px-2 py-1 rounded bg-background/60 border border-border flex-shrink-0">
-                              {m.unit}
-                            </span>
+                            <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                              <span className="text-[11px] px-2 py-1 rounded bg-background/60 border border-border">{m.unit}</span>
+
+                              <span className="text-[10px] px-2 py-1 rounded border border-emerald-500/35 bg-emerald-500/10 text-emerald-300">
+                                {locLabel}
+                              </span>
+                            </div>
                           </div>
 
-                          <div className="mt-3 text-sm opacity-90">
-                            {cur} / {base} {m.unit} ({pct}%)
-                          </div>
+                          <div className="mt-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="text-sm opacity-70">Stan</span>
+                                <span className="text-sm font-medium truncate">
+                                  {cur} / {base} {m.unit}
+                                </span>
+                              </div>
+                              <div className="text-sm font-medium opacity-80 flex-shrink-0">{pct}%</div>
+                            </div>
 
-                          <div className="mt-2 h-2 rounded bg-background/60 overflow-hidden">
-                            <div
-                              className={`h-full ${
-                                pct <= 25 ? "bg-red-500/70" : "bg-foreground/70"
-                              }`}
-                              style={{ width: `${clampPct(pct)}%` }}
-                            />
+                            <div className="mt-2 h-2 rounded bg-background/60 overflow-hidden">
+                              <div
+                                className={`h-full ${pct <= 25 ? "bg-red-500/70" : "bg-foreground/70"}`}
+                                style={{ width: `${clampPct(pct)}%` }}
+                              />
+                            </div>
                           </div>
                         </div>
                       </div>
                     </div>
                   </Link>
 
-                  {/* Akcja — poza Linkiem */}
                   {canRestore ? (
                     <div className="px-4 pb-4">
                       <form action={doRestore} className="flex justify-end">
                         <input type="hidden" name="id" value={m.id} />
+                        <input type="hidden" name="q" value={q} />
+                        <input type="hidden" name="sort" value={sort} />
+                        <input type="hidden" name="dir" value={dir} />
+                        <input type="hidden" name="loc" value={loc} />
+                        <input type="hidden" name="page" value={String(page)} />
+
                         <button className="px-3 py-2 rounded border border-border bg-green-600/20 hover:bg-green-600/30 text-green-100 text-sm">
                           Przywróć
                         </button>
                       </form>
                     </div>
                   ) : (
-                    <div className="px-4 pb-4 text-xs opacity-60 text-right">
-                      Brak uprawnienia do przywracania
-                    </div>
+                    <div className="px-4 pb-4 text-xs opacity-60 text-right">Brak uprawnienia do przywracania</div>
                   )}
                 </li>
               );
@@ -427,13 +519,10 @@ export default async function DeletedMaterialsPage({
         </ul>
       )}
 
-      {/* Pager */}
       <div className="flex items-center justify-between gap-3 pt-2">
         <Link
-          href={mkQuery({ page: Math.max(1, page - 1) })}
-          className={`border border-border px-3 py-2 rounded bg-card hover:bg-card/80 ${
-            page <= 1 ? "pointer-events-none opacity-50" : ""
-          }`}
+          href={mkHref(Math.max(1, page - 1))}
+          className={`border border-border px-3 py-2 rounded bg-card hover:bg-card/80 ${page <= 1 ? "pointer-events-none opacity-50" : ""}`}
           aria-disabled={page <= 1}
         >
           ← Poprzednia
@@ -442,10 +531,8 @@ export default async function DeletedMaterialsPage({
         <div className="text-sm opacity-70">Strona {page}</div>
 
         <Link
-          href={mkQuery({ page: page + 1 })}
-          className={`border border-border px-3 py-2 rounded bg-card hover:bg-card/80 ${
-            rows.length < limit ? "pointer-events-none opacity-50" : ""
-          }`}
+          href={mkHref(page + 1)}
+          className={`border border-border px-3 py-2 rounded bg-card hover:bg-card/80 ${rows.length < limit ? "pointer-events-none opacity-50" : ""}`}
           aria-disabled={rows.length < limit}
         >
           Następna →

@@ -1,3 +1,4 @@
+// src/components/daily-reports/sections/DailyReportCrewSection.tsx
 "use client";
 
 import { useMemo, useState, type Dispatch, type SetStateAction } from "react";
@@ -32,12 +33,9 @@ export default function DailyReportCrewSection({
 }: Props) {
   const crewMode: CrewMode = formState.crewMode as CrewMode;
 
-  const chipBtnBase =
-    "rounded-lg border px-4 py-2 text-sm transition";
-  const chipBtnActive =
-    "border-primary bg-primary/10 text-primary";
-  const chipBtnIdle =
-    "border-border bg-background/30 hover:bg-background/50";
+  const chipBtnBase = "rounded-lg border px-4 py-2 text-sm transition";
+  const chipBtnActive = "border-primary bg-primary/10 text-primary";
+  const chipBtnIdle = "border-border bg-background/30 hover:bg-background/50";
 
   const dangerBtn =
     "rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-sm text-red-300 hover:bg-red-500/15 transition";
@@ -291,8 +289,24 @@ export default function DailyReportCrewSection({
     <section className="space-y-4">
       <h2 className="text-sm font-semibold">Tryb pracy / brygady</h2>
 
-      {/* Tryb pracy – większe przyciski */}
+      {/* ✅ kolejność: solo -> ad_hoc -> crew */}
       <div className="flex flex-wrap gap-3">
+        <button
+          type="button"
+          onClick={() => changeCrewMode("solo")}
+          className={[chipBtnBase, crewMode === "solo" ? chipBtnActive : chipBtnIdle].join(" ")}
+        >
+          Pracuję solo
+        </button>
+
+        <button
+          type="button"
+          onClick={() => changeCrewMode("ad_hoc")}
+          className={[chipBtnBase, crewMode === "ad_hoc" ? chipBtnActive : chipBtnIdle].join(" ")}
+        >
+          Pracuję w niezorganizowanej grupie
+        </button>
+
         <button
           type="button"
           onClick={() => hasDefaultCrew && changeCrewMode("crew")}
@@ -305,30 +319,10 @@ export default function DailyReportCrewSection({
         >
           Pracuję jako brygada
         </button>
-
-        <button
-          type="button"
-          onClick={() => changeCrewMode("solo")}
-          className={[chipBtnBase, crewMode === "solo" ? chipBtnActive : chipBtnIdle].join(" ")}
-        >
-          Pracuję solo
-        </button>
-
-        <button
-          type="button"
-          onClick={() => changeCrewMode("ad_hoc")}
-          className={[
-            chipBtnBase,
-            crewMode === "ad_hoc" ? chipBtnActive : chipBtnIdle,
-          ].join(" ")}
-        >
-          Pracuję w niezorganizowanej grupie
-        </button>
       </div>
 
       {crewMode === "crew" && (
         <>
-          {/* Główna brygada */}
           <div className="space-y-1">
             <div className="text-xs font-medium opacity-70">Główna brygada</div>
             <div className="rounded-xl border border-border bg-background/20 px-3 py-2 text-sm">
@@ -342,7 +336,6 @@ export default function DailyReportCrewSection({
             </div>
           </div>
 
-          {/* Akcje */}
           <div className="flex flex-wrap gap-3">
             <button
               type="button"
@@ -367,7 +360,6 @@ export default function DailyReportCrewSection({
             </button>
           </div>
 
-          {/* Picker brygad */}
           {extraCrewPickerOpen && (
             <div className="mt-2 max-w-md rounded-2xl border border-border bg-card p-3 shadow-lg">
               <div className="mb-2 flex items-center justify-between">
@@ -445,7 +437,6 @@ export default function DailyReportCrewSection({
         </>
       )}
 
-      {/* Picker osób */}
       {extraMemberPickerOpen && (
         <div className="mt-2 max-w-md rounded-2xl border border-border bg-card p-3 shadow-lg">
           <div className="mb-2 flex items-center justify-between">
@@ -492,7 +483,6 @@ export default function DailyReportCrewSection({
         </div>
       )}
 
-      {/* Brygady pomocnicze */}
       {crewMode === "crew" && formState.extraCrews.length > 0 && (
         <div className="space-y-2">
           <div className="text-xs font-medium opacity-70">Brygady pomocnicze</div>
@@ -516,7 +506,6 @@ export default function DailyReportCrewSection({
         </div>
       )}
 
-      {/* Uczestnicy jako byty */}
       {crewMode !== "solo" && (
         <div className="space-y-2">
           <div className="text-sm font-semibold">{participantsLabel}</div>

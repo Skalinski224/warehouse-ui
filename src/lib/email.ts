@@ -1,5 +1,4 @@
 // src/lib/email.ts
-
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const RESEND_FROM =
   process.env.RESEND_FROM || "Warehouse App <onboarding@resend.dev>";
@@ -9,10 +8,16 @@ if (!RESEND_API_KEY) {
   console.warn("[email] RESEND_API_KEY is not set – emails will not be sent");
 }
 
+function safeEmail(s: string): string {
+  return String(s ?? "").trim();
+}
+
 /** URL do akceptacji zaproszenia, np. http://localhost:3000/invite/<token> */
 export function buildInviteUrl(token: string): string {
   const base = APP_BASE_URL.replace(/\/+$/, "");
-  return `${base}/invite/${token}`;
+  // token zwykle jest url-safe, ale nie ryzykujmy whitespace/kontrolnych
+  const t = String(token ?? "").trim().replace(/[\u0000-\u001F\u007F\s]+/g, "");
+  return `${base}/invite/${t}`;
 }
 
 type SendInviteEmailParams = {
@@ -28,6 +33,9 @@ export async function sendInviteEmail({
     return { ok: false, error: "Brak RESEND_API_KEY" };
   }
 
+  const toSafe = safeEmail(to);
+  if (!toSafe) return { ok: false, error: "Brak adresu email" };
+
   try {
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
@@ -37,7 +45,7 @@ export async function sendInviteEmail({
       },
       body: JSON.stringify({
         from: RESEND_FROM,
-        to: [to],
+        to: [toSafe],
         subject: "Zaproszenie do Warehouse App",
         html: `
           <div style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size:14px; color:#e5e7eb; background:#020817; padding:24px;">

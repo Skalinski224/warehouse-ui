@@ -1,4 +1,6 @@
+// src/app/(app)/daily-reports/new/page.tsx
 import { redirect } from "next/navigation";
+import BackButton from "@/components/BackButton";
 import { supabaseServer } from "@/lib/supabaseServer";
 import { fetchMyDefaultCrew, fetchAllCrewsWithMembers } from "@/lib/queries/crews";
 import { fetchActiveMaterials } from "@/lib/queries/materials";
@@ -18,18 +20,15 @@ function coerceSnapshot(data: any): PermissionSnapshot | null {
 export default async function NewDailyReportPage() {
   const supabase = await supabaseServer();
 
-  // permissions snapshot (DB source of truth)
   const { data, error } = await supabase.rpc("my_permissions_snapshot");
   const snapshot = coerceSnapshot(data);
 
   if (!snapshot || error) redirect("/");
 
-  // Każdy może wypełnić => ale tylko jeśli ma create
   if (!can(snapshot, PERM.DAILY_REPORTS_CREATE)) {
     redirect("/daily-reports");
   }
 
-  // aktualny user – do "Osoba wypełniająca" + powiązanie z team_members
   const { data: userRes } = await supabase.auth.getUser();
   const user = userRes?.user ?? null;
 
@@ -37,31 +36,43 @@ export default async function NewDailyReportPage() {
   let defaultPerson = "";
 
   if (user) {
-    const metaFullName =
-      ((user.user_metadata as any)?.full_name as string | undefined) ?? "";
+    // 1) users.name
+    const { data: prof, error: pErr } = await supabase
+      .from("users")
+      .select("name")
+      .eq("id", user.id)
+      .maybeSingle();
 
-    if (metaFullName && metaFullName.trim()) {
-      defaultPerson = metaFullName.trim();
-    } else {
-      const { data: member } = await supabase
+    if (pErr) console.warn("NewDailyReportPage: users profile fetch error:", pErr);
+
+    const usersName = String((prof as any)?.name ?? "").trim();
+    if (usersName) defaultPerson = usersName;
+
+    // 2) team_members
+    if (!defaultPerson) {
+      const { data: member, error: mErr } = await supabase
         .from("team_members")
         .select("id, first_name, last_name")
         .eq("user_id", user.id)
         .is("deleted_at", null)
         .maybeSingle();
 
+      if (mErr) console.warn("NewDailyReportPage: team_members fetch error:", mErr);
+
       if (member) {
         currentMemberId = member.id as string;
         const name = `${member.first_name ?? ""} ${member.last_name ?? ""}`.trim();
-        if (name) {
-          defaultPerson = name;
-        }
+        if (name) defaultPerson = name;
       }
     }
 
+    // 3) user_metadata
     if (!defaultPerson) {
-      defaultPerson = user.email ?? "";
+      const metaFullName = String(((user.user_metadata as any)?.full_name ?? "") as string).trim();
+      if (metaFullName) defaultPerson = metaFullName;
     }
+
+    if (!defaultPerson) defaultPerson = "Użytkownik";
   }
 
   const defaultCrewPromise = fetchMyDefaultCrew();
@@ -83,11 +94,18 @@ export default async function NewDailyReportPage() {
 
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-xl font-semibold">Nowy raport dzienny</h1>
-        <p className="text-sm text-muted-foreground">
-          Uzupełnij dzisiejszy raport: brygada, zadanie, zużyte materiały i status prac.
-        </p>
+      {/* HEADER: jak reszta modułów */}
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className="text-sm font-medium">Nowy raport dzienny</h1>
+          <p className="text-xs text-muted-foreground">
+            Uzupełnij raport: brygada, zadanie, zużyte materiały i status prac.
+          </p>
+        </div>
+
+        <div className="shrink-0">
+          <BackButton />
+        </div>
       </div>
 
       <DailyReportForm

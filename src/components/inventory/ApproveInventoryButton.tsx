@@ -1,3 +1,4 @@
+// src/app/(app)/inventory/_components/ApproveInventoryButton.tsx
 "use client";
 
 import { useEffect, useState, useTransition } from "react";
@@ -22,8 +23,28 @@ export default function ApproveInventoryButton(props: {
 
   function confirm() {
     startTransition(async () => {
-      await props.onConfirm();
-      setOpen(false);
+      try {
+        await props.onConfirm();
+        setOpen(false);
+      } catch (e: any) {
+        // ✅ Next.js redirect()/notFound() po stronie klienta wygląda jak "błąd"
+        const digest = String(e?.digest ?? "");
+        const msg = String(e?.message ?? "");
+
+        const isNextRedirect =
+          digest.includes("NEXT_REDIRECT") || msg.includes("NEXT_REDIRECT");
+        const isNextNotFound =
+          digest.includes("NEXT_NOT_FOUND") || msg.includes("NEXT_NOT_FOUND");
+
+        if (isNextRedirect || isNextNotFound) {
+          // traktujemy jako sukces nawigacji
+          setOpen(false);
+          return;
+        }
+
+        // prawdziwy błąd — zostawiamy (możesz tu podpiąć toast jeśli chcesz)
+        throw e;
+      }
     });
   }
 

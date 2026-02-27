@@ -1,6 +1,7 @@
+// src/components/UserMenu.tsx
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { signOut } from "@/app/actions/signout";
 import { usePermissionSnapshot } from "@/lib/RoleContext";
 import { PERM, can } from "@/lib/permissions";
@@ -10,15 +11,34 @@ function cx(...c: Array<string | false | null | undefined>) {
 }
 
 type Props = {
-  fullName: string; // Imię Nazwisko
-  roleLabel: string; // manager/owner/storeman/worker/...
-  crewName?: string | null; // nazwa brygady (opcjonalnie)
+  fullName: string;
+  roleLabel: string;
+  crewName?: string | null;
 };
+
+function toPlRoleLabel(roleLabel: string): string {
+  const raw = String(roleLabel ?? "").trim();
+  const key = raw.toLowerCase();
+
+  const map: Record<string, string> = {
+    owner: "Właściciel",
+    manager: "Kierownik",
+    project_manager: "Kierownik projektu",
+    storeman: "Magazynier",
+    worker: "Pracownik",
+    foreman: "Brygadzista",
+    forman: "Brygadzista", // na wypadek literówki w danych
+  };
+
+  return map[key] ?? (raw ? raw.charAt(0).toUpperCase() + raw.slice(1) : "—");
+}
 
 export default function UserMenu({ fullName, roleLabel, crewName }: Props) {
   const snapshot = usePermissionSnapshot();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+
+  const rolePl = useMemo(() => toPlRoleLabel(roleLabel), [roleLabel]);
 
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
@@ -43,7 +63,7 @@ export default function UserMenu({ fullName, roleLabel, crewName }: Props) {
         <div className="flex flex-col items-start leading-tight">
           <span className="text-sm font-semibold text-foreground">{fullName}</span>
           <span className="text-[11px] text-muted-foreground">
-            {roleLabel}
+            {rolePl}
             {crewName ? ` • ${crewName}` : ""}
           </span>
         </div>
@@ -54,13 +74,14 @@ export default function UserMenu({ fullName, roleLabel, crewName }: Props) {
         <div
           className={cx(
             "absolute right-0 mt-2 w-64 rounded-2xl border border-border bg-card/90 p-2",
-            "shadow-lg backdrop-blur"
+            "shadow-lg backdrop-blur",
+            "z-50"
           )}
         >
           <div className="px-2 py-2">
             <div className="text-xs font-semibold text-foreground">{fullName}</div>
             <div className="mt-0.5 text-[11px] text-muted-foreground">
-              rola: <span className="text-foreground/90">{roleLabel}</span>
+              rola: <span className="text-foreground/90">{rolePl}</span>
               {crewName ? (
                 <>
                   {" "}
